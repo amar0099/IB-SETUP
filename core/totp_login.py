@@ -141,20 +141,12 @@ def _fyers_login(
 
         # Extract the verified fy_id from the Step 3 session data
         # Fyers returns the canonical client ID here regardless of login method
-        r3_data  = r3d.get("data", {})
-        fyers_id = (
-            r3_data.get("fy_id")
-            or r3_data.get("fyersId")
-            or r3_data.get("fyers_id")
-            or username   # fallback to whatever was passed
-        )
-        _s(f"Fyers 4/5 — using fyers_id: {fyers_id}")
 
         r4 = sess.post(
             "https://api-t1.fyers.in/api/v3/token",
             json={
-                "fyers_id": fyers_id,
-                "app_id":   app_id_short,
+                "fyers_id": username,
+                "app_id":   client_id,
                 "redirect_uri": redirect_uri,
                 "appType": "100",
                 "code_challenge": "",
