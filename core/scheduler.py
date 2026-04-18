@@ -64,6 +64,11 @@ class DailyScheduler:
         self.fyers  = None
         self.broker = None
 
+        # Connection status (accessible from UI via globals)
+        self.fy_connected = False
+        self.zd_connected = False
+        self.login_error  = ""
+
     # ── Public ────────────────────────────────────────────────────────────────
 
     def start(self):
