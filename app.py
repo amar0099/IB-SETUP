@@ -319,7 +319,7 @@ with tab_dash:
     _pill(cc1, "Fyers",       fy_ok, "Connected")
     _pill(cc2, "Zerodha",     zd_ok, "Connected")
     _pill(cc3, "Live feed",   ws_ok, "Live", "Offline")
-    _pill(cc4, "Scheduler",   sched and is not None, "Running")
+    _pill(cc4, "Scheduler",   sched is not None, "Running")
 
     if sched and sched.login_error:
         st.error(f"Login error: {sched.login_error}")
