@@ -144,7 +144,7 @@ def _fyers_login(
         # fyers_id must be the Fyers Client ID (e.g. "XY12345"), NOT email.
         # Step 3 response contains the actual fy_id — use that directly.
         _s("Fyers 4/5 — fetching auth code…")
-        app_id_short = client_id.split("-")[0]
+        app_id_short = client_id.split("-")[-1]
 
         # Extract the verified fy_id from the Step 3 session data
         # Fyers returns the canonical client ID here regardless of login method
