@@ -218,6 +218,19 @@ def _zerodha_login(
         req_token = params.get("request_token", [None])[0]
         if not req_token:
             req_token = parse_qs(parsed.fragment).get("request_token", [None])[0]
+        
+        # If landed on /connect/authorize, follow it
+        if not req_token and "authorize" in r3.url:
+            sess_id = params.get("sess_id", [None])[0]
+            if sess_id:
+                r3b = sess.get(
+                    f"https://kite.zerodha.com/connect/finish?api_key={api_key}&sess_id={sess_id}",
+                    allow_redirects=True, timeout=10,
+                )
+                parsed    = urlparse(r3b.url)
+                params    = parse_qs(parsed.query)
+                req_token = params.get("request_token", [None])[0]
+        
         if not req_token:
             return None, f"Zerodha step 3: request_token not found. URL: {r3.url}"
 
