@@ -165,36 +165,27 @@ def _append_log(level, msg):
         pass
 
 def _on_login_success(fyers, broker):
-    try:
-        engine = AlgoEngine(fyers, broker)
-        engine.index      = "NIFTY"
-        engine.lots       = 1
-        engine.pe_offset  = 0
-        engine.ce_offset  = 0
-        engine.paper_mode = True
+    engine = AlgoEngine(fyers, broker)
+    engine.index      = "NIFTY"
+    engine.lots       = 1
+    engine.pe_offset  = 0
+    engine.ce_offset  = 0
+    engine.paper_mode = True
 
-        # Assign engine to scheduler FIRST (this is thread-safe)
-        sched = globals().get("_scheduler_singleton")
-        if sched:
-            sched.engine = engine
-            sched.fyers  = fyers
-            sched.broker = broker
+    # Assign to scheduler (thread-safe global)
+    sched = globals().get("_scheduler_singleton")
+    if sched:
+        sched.engine = engine
+        sched.fyers  = fyers
+        sched.broker = broker
 
-        # Then try session_state (may fail from background thread, that's OK)
-        try:
-            st.session_state.fyers        = fyers
-            st.session_state.broker       = broker
-            st.session_state.engine       = engine
-            st.session_state.fy_connected = True
-            st.session_state.zd_connected = True
-            st.session_state.login_error  = ""
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-
+    # Force session_state update
+    st.session_state["fyers"]        = fyers
+    st.session_state["broker"]       = broker
+    st.session_state["engine"]       = engine
+    st.session_state["fy_connected"] = True
+    st.session_state["zd_connected"] = True
+    st.session_state["login_error"]  = ""
 
 def _on_login_failure(error):
     st.session_state.login_error  = error
