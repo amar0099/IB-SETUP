@@ -333,8 +333,7 @@ with tab_dash:
               with st.spinner("Logging in..."):
                   clear_all_caches()
                   sched.trigger_login_now()
-                  _t.sleep(10)
-              st.rerun()
+                  st.success("Re-login triggered. Check Code Log tab for progress.")
 
     with mb2:
         if st.button("Clear cache", use_container_width=True):
@@ -342,6 +341,7 @@ with tab_dash:
             st.toast("Cache cleared.")
     with mb3:
         if st.button("↻ Refresh status", use_container_width=True):
+            st.toast("Refreshing...")
             st.rerun()
 
     # ── Engine controls ───────────────────────────────────────────────────────
