@@ -284,7 +284,7 @@ if not creds_ok:
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab_dash, tab_config, tab_log = st.tabs(["Dashboard", "Config", "Log"])
+tab_dash, tab_config, tab_log, tab_codelog = st.tabs(["Dashboard", "Config", "Log", "Code Log"])
 
 engine  = st.session_state.engine
 fyers   = st.session_state.fyers
@@ -581,8 +581,74 @@ with tab_log:
     else:
         st.caption("No log entries match the filter.")
 
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 4 — CODE LOG
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_codelog:
+    import pathlib, logging as _logging
+
+    LOG_FILE = pathlib.Path("algo.log")
+
+    # Setup Python file logger once per process
+    if not st.session_state.get("_file_logger_ready"):
+        _fl = _logging.getLogger("algo")
+        _fl.setLevel(_logging.DEBUG)
+        if not _fl.handlers:
+            _fh = _logging.FileHandler(LOG_FILE, encoding="utf-8")
+            _fh.setLevel(_logging.DEBUG)
+            _fh.setFormatter(_logging.Formatter(
+                "%(asctime)s  [%(levelname)-7s]  %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            ))
+            _fl.addHandler(_fh)
+            import sys as _sys
+            def _exc_hook(et, ev, tb):
+                if issubclass(et, KeyboardInterrupt):
+                    _sys.__excepthook__(et, ev, tb); return
+                _fl.critical("Unhandled exception", exc_info=(et, ev, tb))
+            _sys.excepthook = _exc_hook
+        st.session_state["_file_logger_ready"] = True
+
+    # Mirror _append_log to file
+    if not st.session_state.get("_log_file_patched"):
+        _fl2 = _logging.getLogger("algo")
+        _orig = _append_log
+        def _patched(level, msg):
+            _orig(level, msg)
+            _fl2.log(getattr(_logging, level, _logging.INFO), msg)
+        globals()["_append_log"] = _patched
+        if sched:
+            sched._on_log = _patched
+        st.session_state["_log_file_patched"] = True
+
+    # Controls
+    cl1, cl2, cl3, cl4 = st.columns([1, 1.5, 1, 1])
+    tail_lines  = cl1.number_input("Lines", min_value=50, max_value=5000,
+                                   value=200, step=50, label_visibility="collapsed")
+    search_code = cl2.text_input("Search", placeholder="filter...",
+                                 label_visibility="collapsed", key="code_log_search")
+    if cl3.button("Clear", use_container_width=True):
+        LOG_FILE.write_text("")
+        st.toast("Log cleared.")
+        st.rerun()
+    if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
+        cl4.download_button("Download", data=LOG_FILE.read_bytes(),
+                            file_name="algo.log", mime="text/plain",
+                            use_container_width=True)
+
+    # Display
+    if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
+        raw = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+        if search_code:
+            raw = [l for l in raw if search_code.lower() in l.lower()]
+        show = raw[-int(tail_lines):]
+        st.caption(f"{len(raw)} total lines - showing last {len(show)}")
+        st.code("\n".join(show), language="log")
+    else:
+        st.info("algo.log is empty. Errors and events will appear here once the engine runs.")
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Auto-refresh
+# Auto-refresh — after all tabs
 # ─────────────────────────────────────────────────────────────────────────────
 if engine and engine.running:
     _t.sleep(0.5)
