@@ -334,7 +334,7 @@ with tab_dash:
           if sched:
               clear_all_caches()
               sched.trigger_login_now()
-              st.rerun()
+              st.info("Re-login triggered in background. Refresh page in 10 seconds to see status.")
           
     with mb2:
         if st.button("Clear token cache", use_container_width=True):
