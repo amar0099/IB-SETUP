@@ -74,7 +74,7 @@ def _fyers_login(
     def _s(msg):
         if status_cb: status_cb(msg)
 
-    redirect_uri = "https://ib-setup.streamlit.app/"
+    redirect_uri = "http://127.0.0.1:8080/"
 
     try:
         sess = requests.Session()
