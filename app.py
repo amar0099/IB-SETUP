@@ -311,11 +311,11 @@ if not sched:
         st.info("Scheduler initializing... Refresh page in a moment.")
     st.stop()
 
-engine  = sched.engine
-fyers   = sched.fyers
-broker  = sched.broker
-fy_ok   = sched.fy_connected
-zd_ok   = sched.zd_connected
+engine  = getattr(sched, 'engine', None)
+fyers   = getattr(sched, 'fyers', None)
+broker  = getattr(sched, 'broker', None)
+fy_ok   = getattr(sched, 'fy_connected', False)
+zd_ok   = getattr(sched, 'zd_connected', False)
 ws_ok   = fyers.connected if fyers else False
 
 # ═════════════════════════════════════════════════════════════════════════════
