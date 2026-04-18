@@ -326,20 +326,21 @@ with tab_dash:
         st.error(f"Login error: {st.session_state.login_error}")
 
     # Manual buttons
-    mb1, mb2, _ = st.columns([1, 1, 4])
-  
+    mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
     with mb1:
-      if st.button("Re-login now", use_container_width=True):
-          sched = globals().get("_scheduler_singleton")
-          if sched:
-              clear_all_caches()
-              sched.trigger_login_now()
-              st.info("Re-login triggered in background. Refresh page in 10 seconds to see status.")
-          
+        if st.button("Re-login now", use_container_width=True):
+            sched = globals().get("_scheduler_singleton")
+            if sched:
+                clear_all_caches()
+                sched.trigger_login_now()
+                st.toast("Login started (check Code Log in 10s)")
     with mb2:
-        if st.button("Clear token cache", use_container_width=True):
+        if st.button("Clear cache", use_container_width=True):
             clear_all_caches()
             st.toast("Cache cleared.")
+    with mb3:
+        if st.button("↻ Refresh status", use_container_width=True):
+            st.rerun()
 
     # ── Engine controls ───────────────────────────────────────────────────────
     st.markdown("<div class='sh'>Engine</div>", unsafe_allow_html=True)
