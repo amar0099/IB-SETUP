@@ -20,11 +20,10 @@ import streamlit as st
 IST = pytz.timezone("Asia/Kolkata")
 
 
-# Temporary: force recreate scheduler with new attributes
-if "scheduler" in st.session_state:
-    old_sched = st.session_state.scheduler
-    if not hasattr(old_sched, 'fy_connected'):
-        del st.session_state["scheduler"]
+# FORCE DELETE OLD SCHEDULER - remove after first successful load
+for key in list(st.session_state.keys()):
+    if 'scheduler' in key.lower():
+        del st.session_state[key]
 
 
 st.set_page_config(
