@@ -327,12 +327,15 @@ with tab_dash:
     # Manual buttons
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
     with mb1:
-        if st.button("Re-login now", use_container_width=True):
-            sched = globals().get("_scheduler_singleton")
-            if sched:
-                clear_all_caches()
-                sched.trigger_login_now()
-                st.toast("Login started (check Code Log in 10s)")
+      if st.button("Re-login now", use_container_width=True):
+          sched = globals().get("_scheduler_singleton")
+          if sched:
+              with st.spinner("Logging in..."):
+                  clear_all_caches()
+                  sched.trigger_login_now()
+                  _t.sleep(10)
+              st.rerun()
+
     with mb2:
         if st.button("Clear cache", use_container_width=True):
             clear_all_caches()
