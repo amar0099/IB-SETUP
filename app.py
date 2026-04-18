@@ -327,12 +327,17 @@ with tab_dash:
 
     # Manual buttons
     mb1, mb2, _ = st.columns([1, 1, 4])
+  
     with mb1:
-        if st.button("Re-login now", use_container_width=True):
-            if sched:
-                clear_all_caches()
-                sched.trigger_login_now()
-                st.toast("Re-login triggered…")
+      if st.button("Re-login now", use_container_width=True):
+          sched = globals().get("_scheduler_singleton")
+          if sched:
+              clear_all_caches()
+              sched.trigger_login_now()
+              st.toast("Re-login triggered…")
+              _t.sleep(8)  # wait for login to complete
+              st.rerun()
+          
     with mb2:
         if st.button("Clear token cache", use_container_width=True):
             clear_all_caches()
