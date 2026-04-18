@@ -167,6 +167,7 @@ def _fyers_login(
             timeout=10,
         )
         r4d = r4.json()
+        _s(f"Fyers step 4 response: {r4d}")
         if r4d.get("s") != "ok":
             return None, f"Fyers step 4 failed: {r4d}"
 
