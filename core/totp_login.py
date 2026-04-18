@@ -207,60 +207,17 @@ def _zerodha_login(
         if r2d.get("status") != "success":
             return None, f"Zerodha step 2 failed: {r2d.get('message', r2d)}"
 
-        # Step 3 — get request_token
-        _s("Zerodha 3/4 — fetching request token…")
-        r3 = sess.get(
-            f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3",
-            allow_redirects=True, timeout=10,
-            headers={"Referer": "https://kite.zerodha.com/"},
-        )
-        parsed    = urlparse(r3.url)
-        params    = parse_qs(parsed.query)
-        req_token = params.get("request_token", [None])[0]
+        # Step 3 — extract enctoken from cookies (set by Step 2 TOTP)
+        _s("Zerodha 3/3 — extracting enctoken…")
+        enctoken = sess.cookies.get("enctoken")
+        if not enctoken:
+            return None, "Zerodha step 3: enctoken cookie not set after TOTP login."
 
-        if not req_token and "authorize" in r3.url:
-            sess_id = params.get("sess_id", [None])[0]
-            if sess_id:
-                r3b = sess.get(
-                    f"https://kite.zerodha.com/connect/authorize?api_key={api_key}&sess_id={sess_id}",
-                    allow_redirects=True, timeout=10,
-                    headers={
-                        "Referer": f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3",
-                        "X-Kite-Version": "3",
-                    },
-                )
-                # Zerodha may return 200 after following redirects internally;
-                # the final URL (r3b.url) contains the request_token.
-                final_url = r3b.url
-                location  = r3b.headers.get("Location", "")
-                _s(f"Zerodha authorize: status={r3b.status_code} final_url={final_url} location={location} body_snippet={r3b.text[:500]}")
-                for candidate in (final_url, location):
-                    if candidate:
-                        _parsed = urlparse(candidate)
-                        _params = parse_qs(_parsed.query)
-                        _tok    = _params.get("request_token", [None])[0]
-                        if _tok:
-                            req_token = _tok
-                            break
-
-        # Step 4 — exchange for access token
-        _s("Zerodha 4/4 — generating access token…")
-        if not req_token:
-            return None, (
-                "Zerodha step 3: could not extract request_token. "
-                "The authorize redirect did not return a request_token — "
-                "check api_key, credentials, or whether Zerodha changed their login flow."
-            )
-        from kiteconnect import KiteConnect
-        session = KiteConnect(api_key=api_key).generate_session(
-            req_token, api_secret=api_secret
-        )
-        token = session.get("access_token")
-        if not token:
-            return None, f"Zerodha step 4: no access_token in {session}"
-
-        _s("Zerodha login complete.")
+        # enctoken IS the access token for Kite Web API
+        token = enctoken
+        _s("Zerodha login complete (using enctoken).")
         return token, None
+
 
     except Exception as e:
         return None, f"Zerodha exception: {e}"
