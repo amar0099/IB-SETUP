@@ -98,6 +98,13 @@ def _fyers_login(
     try:
         sess = requests.Session()
 
+        # Clear any existing Fyers session before starting
+        try:
+            sess.get("https://api-t2.fyers.in/vagator/v2/logout", timeout=5)
+        except Exception:
+            pass
+        
+        # Step 1 — send OTP
         # Step 1 — send OTP
         _s("Fyers 1/5 — sending login OTP…")
         r1 = sess.post(
