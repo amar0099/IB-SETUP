@@ -222,11 +222,13 @@ def _zerodha_login(
         # If landed on /connect/authorize, follow it
         if not req_token and "authorize" in r3.url:
             sess_id = params.get("sess_id", [None])[0]
+
             if sess_id:
                 r3b = sess.get(
                     f"https://kite.zerodha.com/connect/finish?api_key={api_key}&sess_id={sess_id}",
                     allow_redirects=True, timeout=10,
                 )
+                _s(f"Zerodha authorize redirect: {r3b.url}")
                 parsed    = urlparse(r3b.url)
                 params    = parse_qs(parsed.query)
                 req_token = params.get("request_token", [None])[0]
