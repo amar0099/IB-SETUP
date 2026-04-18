@@ -153,9 +153,9 @@ def _fyers_login(
             "https://api-t1.fyers.in/api/v3/token",
             json={
                 "fyers_id": username,
-                "app_id":   client_id,
+                "app_id":   client_id.split("-")[0],
                 "redirect_uri": redirect_uri,
-                "appType": "100",
+                "appType": client_id.split("-")[-1],
                 "code_challenge": "",
                 "state": "algo",
                 "scope": "",
