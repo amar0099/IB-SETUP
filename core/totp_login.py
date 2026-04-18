@@ -207,7 +207,7 @@ def _zerodha_login(
         if r2d.get("status") != "success":
             return None, f"Zerodha step 2 failed: {r2d.get('message', r2d)}"
 
-        # Step 3 — get request_token from redirect
+        # Step 3 — get request_token
         _s("Zerodha 3/4 — fetching request token…")
         r3 = sess.get(
             f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3",
@@ -216,25 +216,28 @@ def _zerodha_login(
         parsed    = urlparse(r3.url)
         params    = parse_qs(parsed.query)
         req_token = params.get("request_token", [None])[0]
-        if not req_token:
-            req_token = parse_qs(parsed.fragment).get("request_token", [None])[0]
         
-        # If landed on /connect/authorize, follow it
+        # /connect/authorize requires a POST to submit consent
         if not req_token and "authorize" in r3.url:
             sess_id = params.get("sess_id", [None])[0]
-
             if sess_id:
-                r3b = sess.get(
-                    f"https://kite.zerodha.com/connect/finish?api_key={api_key}&sess_id={sess_id}",
+                r3b = sess.post(
+                    "https://kite.zerodha.com/connect/authorize",
+                    data={"api_key": api_key, "sess_id": sess_id},
                     allow_redirects=True, timeout=10,
                 )
-                _s(f"Zerodha authorize redirect: {r3b.url}")
+                _s(f"Zerodha post-authorize URL: {r3b.url}")
                 parsed    = urlparse(r3b.url)
                 params    = parse_qs(parsed.query)
                 req_token = params.get("request_token", [None])[0]
+                if not req_token:
+                    req_token = parse_qs(parsed.fragment).get("request_token", [None])[0]
         
         if not req_token:
             return None, f"Zerodha step 3: request_token not found. URL: {r3.url}"
+
+
+        
 
         # Step 4 — exchange for access token
         _s("Zerodha 4/4 — generating access token…")
