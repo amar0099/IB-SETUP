@@ -348,8 +348,11 @@ with tab_dash:
     b1, b2, b3, _ = st.columns([1, 1, 1.2, 3])
 
     with b1:
-        if st.button("▶ Start", use_container_width=True,
-                     disabled=(not engine) or eng_running or not st.session_state.algo_expiry):
+        start_disabled = (not engine) or eng_running or not st.session_state.get("algo_expiry")
+        if start_disabled:
+            st.caption(f"Disabled: engine={engine}, running={eng_running}, expiry={st.session_state.get('algo_expiry')}")
+        if st.button("▶ Start", use_container_width=True, disabled=start_disabled):
+
             engine.expiry     = st.session_state.algo_expiry
             engine.index      = st.session_state.algo_index
             engine.lots       = st.session_state.algo_lots
