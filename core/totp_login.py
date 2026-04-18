@@ -134,14 +134,26 @@ def _fyers_login(
             return None, f"Fyers step 3 failed: {r3d}"
 
         # Step 4 — get auth code
-        # app_id_short = prefix only (e.g. "XXXX" from "XXXX-100") — used in Step 4 payload
-        # client_id    = full string (e.g. "XXXX-100") — used in Step 5 hash
+        # fyers_id must be the Fyers Client ID (e.g. "XY12345"), NOT email.
+        # Step 3 response contains the actual fy_id — use that directly.
         _s("Fyers 4/5 — fetching auth code…")
         app_id_short = client_id.split("-")[0]
+
+        # Extract the verified fy_id from the Step 3 session data
+        # Fyers returns the canonical client ID here regardless of login method
+        r3_data  = r3d.get("data", {})
+        fyers_id = (
+            r3_data.get("fy_id")
+            or r3_data.get("fyersId")
+            or r3_data.get("fyers_id")
+            or username   # fallback to whatever was passed
+        )
+        _s(f"Fyers 4/5 — using fyers_id: {fyers_id}")
+
         r4 = sess.post(
             "https://api-t1.fyers.in/api/v3/token",
             json={
-                "fyers_id": username,
+                "fyers_id": fyers_id,
                 "app_id":   app_id_short,
                 "redirect_uri": redirect_uri,
                 "appType": "100",
