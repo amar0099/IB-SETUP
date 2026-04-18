@@ -664,6 +664,3 @@ with tab_codelog:
 if engine and engine.running:
     _t.sleep(0.5)
     st.rerun()
-else:
-    _t.sleep(10)
-    st.rerun()
