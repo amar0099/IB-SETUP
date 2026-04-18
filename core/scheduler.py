@@ -172,7 +172,14 @@ class DailyScheduler:
             self._login_retries = 0
             self._log("INFO", "Both brokers connected successfully.")
             self._on_login_success(fyers, broker)
+          
+            # If it's past 09:15 and engine was just built, start it now
+            now_time = datetime.now(IST).time()
+            if now_time >= START_TIME and self.engine and not self.engine.running:
+                self.engine.start()
+                self._log("INFO", "Engine started immediately post-login.")
 
+      
         except Exception as e:
             self._login_retries += 1
             self._log("ERROR", f"Login failed (attempt {self._login_retries}/{MAX_LOGIN_RETRIES}): {e}")
