@@ -64,11 +64,6 @@ class DailyScheduler:
         self.fyers  = None
         self.broker = None
 
-        # Connection status (accessible from UI via globals)
-        self.fy_connected = False
-        self.zd_connected = False
-        self.login_error  = ""
-
     # ── Public ────────────────────────────────────────────────────────────────
 
     def start(self):
@@ -179,21 +174,22 @@ class DailyScheduler:
             self.zd_connected = True
             self.login_error  = ""
             self._log("INFO", "Both brokers connected successfully.")
+            
+            # Build engine here in scheduler
+            from .engine import AlgoEngine
+            engine = AlgoEngine(fyers, broker)
+            engine.index      = "NIFTY"
+            engine.lots       = 1
+            engine.pe_offset  = 0
+            engine.ce_offset  = 0
+            engine.paper_mode = True
+            self.engine = engine
+            self._log("INFO", f"Engine created: {engine}")
+            
             self._on_login_success(fyers, broker)
-          
-            # If it's past 09:15 and engine was just built, start it now
-            now_time = datetime.now(IST).time()
-            if now_time >= START_TIME and self.engine and not self.engine.running:
-                self.engine.start()
-                self._log("INFO", "Engine started immediately post-login.")
 
-      
         except Exception as e:
             self._login_retries += 1
-            self.fy_connected = False
-            self.zd_connected = False
-            self.login_error  = str(e)
-
             self._log("ERROR", f"Login failed (attempt {self._login_retries}/{MAX_LOGIN_RETRIES}): {e}")
             self._on_login_failure(str(e))
 
@@ -215,28 +211,18 @@ class DailyScheduler:
     # ── Engine start / stop ───────────────────────────────────────────────────
 
     def _do_start_engine(self):
-      # Wait up to 60 seconds for engine to become available
-      for _ in range(12):
-          if self.engine is not None:
-              break
-          time_mod.sleep(5)
-  
-      if self.engine is None:
-          self._log("INFO", "Engine unavailable — will retry on next scheduler tick.")
-          self._last_start_day = None   # allow retry
-          return
-  
-      if not self.engine.running:
-          self.engine.start()
-          self._log("INFO", "Engine auto-started.")
+        if self.engine is None:
+            self._log("INFO", "Engine not ready at 09:15 — login may still be in progress.")
+            return
+        if not self.engine.running:
+            self.engine.start()
+            self._log("INFO", "Engine auto-started at 09:15.")
 
     def _do_stop_engine(self):
         if self.engine and self.engine.running:
             self.engine.stop()
             self._log("INFO", "Engine auto-stopped at 15:30.")
-    
-  
-  
+
     # ── Log ───────────────────────────────────────────────────────────────────
 
     def _log(self, level: str, msg: str):
