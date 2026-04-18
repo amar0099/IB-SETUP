@@ -203,18 +203,28 @@ class DailyScheduler:
     # ── Engine start / stop ───────────────────────────────────────────────────
 
     def _do_start_engine(self):
-        if self.engine is None:
-            self._log("INFO", "Engine not ready at 09:15 — login may still be in progress.")
-            return
-        if not self.engine.running:
-            self.engine.start()
-            self._log("INFO", "Engine auto-started at 09:15.")
+      # Wait up to 60 seconds for engine to become available
+      for _ in range(12):
+          if self.engine is not None:
+              break
+          time_mod.sleep(5)
+  
+      if self.engine is None:
+          self._log("INFO", "Engine unavailable — will retry on next scheduler tick.")
+          self._last_start_day = None   # allow retry
+          return
+  
+      if not self.engine.running:
+          self.engine.start()
+          self._log("INFO", "Engine auto-started.")
 
     def _do_stop_engine(self):
         if self.engine and self.engine.running:
             self.engine.stop()
             self._log("INFO", "Engine auto-stopped at 15:30.")
-
+    
+  
+  
     # ── Log ───────────────────────────────────────────────────────────────────
 
     def _log(self, level: str, msg: str):
