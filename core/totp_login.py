@@ -231,7 +231,7 @@ def _zerodha_login(
                     },
                     allow_redirects=True, timeout=10,
                 )
-                _s(f"Zerodha post-authorize URL: {r3b.url}")
+                _s(f"Zerodha post-authorize URL: {r3b.url} | status: {r3b.status_code} | body: {r3b.text[:300]}")
                 parsed    = urlparse(r3b.url)
                 params    = parse_qs(parsed.query)
                 req_token = params.get("request_token", [None])[0]
