@@ -216,32 +216,19 @@ def _zerodha_login(
         parsed    = urlparse(r3.url)
         params    = parse_qs(parsed.query)
         req_token = params.get("request_token", [None])[0]
-        
-        # /connect/authorize requires a POST to submit consent
+
         if not req_token and "authorize" in r3.url:
             sess_id = params.get("sess_id", [None])[0]
             if sess_id:
-                r3b = sess.post(
-                    "https://kite.zerodha.com/connect/authorize",
-                    data={
-                        "api_key":      api_key,
-                        "sess_id":      sess_id,
-                        "redirect_uri": "https://ib-setup.streamlit.app/",
-                        "checksum":     hashlib.sha256(f"{api_key}{sess_id}".encode()).hexdigest(),
-                    },
-                    allow_redirects=True, timeout=10,
+                r3b = sess.get(
+                    f"https://kite.zerodha.com/connect/authorize?api_key={api_key}&sess_id={sess_id}",
+                    allow_redirects=False, timeout=10,
                 )
-                _s(f"Zerodha post-authorize URL: {r3b.url} | status: {r3b.status_code} | body: {r3b.text[:300]}")
-                parsed    = urlparse(r3b.url)
+                _s(f"Zerodha authorize: status={r3b.status_code} location={r3b.headers.get('Location','none')}")
+                redirect_url = r3b.headers.get("Location", "")
+                parsed    = urlparse(redirect_url)
                 params    = parse_qs(parsed.query)
                 req_token = params.get("request_token", [None])[0]
-                if not req_token:
-                    req_token = parse_qs(parsed.fragment).get("request_token", [None])[0]
-        
-        if not req_token:
-            return None, f"Zerodha step 3: request_token not found. URL: {r3.url}"
-
-
         
 
         # Step 4 — exchange for access token
