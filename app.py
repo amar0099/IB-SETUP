@@ -232,11 +232,7 @@ def _bootstrap():
     sched.zd_password   = st.session_state.zd_password
     sched.zd_totp_key   = st.session_state.zd_totp_key
     st.session_state.scheduler = sched
-        globals()["_scheduler_singleton"] = sched   # thread-accessible reference
-        sched.start()
   
-    sched.start()
-
     from core.scheduler import LOGIN_TIME, STOP_TIME
     now = datetime.now(IST)
     if LOGIN_TIME <= now.time() <= STOP_TIME:
