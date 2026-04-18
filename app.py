@@ -338,10 +338,11 @@ with tab_dash:
     _pill(cc1, "Fyers",       fy_ok, "Connected")
     _pill(cc2, "Zerodha",     zd_ok, "Connected")
     _pill(cc3, "Live feed",   ws_ok, "Live", "Offline")
-    _pill(cc4, "Scheduler",   sched and sched.running, "Running")
+    _pill(cc4, "Scheduler",   sched and getattr(sched, 'running', False), "Running")
 
-    if sched and sched.login_error:
-        st.error(f"Login error: {sched.login_error}")
+    login_err = getattr(sched, 'login_error', '') if sched else ''
+    if login_err:
+        st.error(f"Login error: {login_err}")
 
     # Manual buttons
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
