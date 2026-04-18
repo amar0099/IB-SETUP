@@ -190,6 +190,10 @@ class DailyScheduler:
       
         except Exception as e:
             self._login_retries += 1
+            self.fy_connected = False
+            self.zd_connected = False
+            self.login_error  = str(e)
+
             self._log("ERROR", f"Login failed (attempt {self._login_retries}/{MAX_LOGIN_RETRIES}): {e}")
             self._on_login_failure(str(e))
 
