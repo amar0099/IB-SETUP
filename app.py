@@ -165,21 +165,28 @@ def _append_log(level, msg):
         pass
 
 def _on_login_success(fyers, broker):
-    st.session_state.fyers        = fyers
-    st.session_state.broker       = broker
-    st.session_state.fy_connected = True
-    st.session_state.zd_connected = True
-    st.session_state.login_error  = ""
-    engine = AlgoEngine(fyers, broker)
-    engine.index      = st.session_state.algo_index
-    engine.lots       = st.session_state.algo_lots
-    engine.pe_offset  = st.session_state.algo_pe_offset
-    engine.ce_offset  = st.session_state.algo_ce_offset
-    engine.paper_mode = st.session_state.algo_paper_mode
-    if st.session_state.algo_expiry:
-        engine.expiry = st.session_state.algo_expiry
-    st.session_state.scheduler.engine = engine
-    st.session_state.engine = engine
+    try:
+        st.session_state.fyers        = fyers
+        st.session_state.broker       = broker
+        st.session_state.fy_connected = True
+        st.session_state.zd_connected = True
+        st.session_state.login_error  = ""
+
+        engine = AlgoEngine(fyers, broker)
+        engine.index      = st.session_state.get("algo_index",      "NIFTY")
+        engine.lots       = st.session_state.get("algo_lots",       1)
+        engine.pe_offset  = st.session_state.get("algo_pe_offset",  0)
+        engine.ce_offset  = st.session_state.get("algo_ce_offset",  0)
+        engine.paper_mode = st.session_state.get("algo_paper_mode", True)
+        if st.session_state.get("algo_expiry"):
+            engine.expiry = st.session_state.algo_expiry
+
+        if st.session_state.get("scheduler"):
+            st.session_state.scheduler.engine = engine
+        st.session_state.engine = engine
+    except Exception as e:
+        # Background thread may not have full session_state access
+        pass
 
 def _on_login_failure(error):
     st.session_state.login_error  = error
