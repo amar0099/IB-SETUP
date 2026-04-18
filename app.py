@@ -329,9 +329,14 @@ with tab_dash:
     with mb1:
         if st.button("Re-login now", use_container_width=True):
             sched = globals().get("_scheduler_singleton")
+            st.write(f"DEBUG: sched = {sched}, type = {type(sched)}")
             if sched:
                 clear_all_caches()
                 sched.trigger_login_now()
+                st.success("Login triggered")
+            else:
+                st.error("Scheduler not found in globals()")
+
     with mb2:
         if st.button("Clear cache", use_container_width=True):
             clear_all_caches()
