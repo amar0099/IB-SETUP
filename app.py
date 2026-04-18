@@ -173,7 +173,7 @@ def _on_login_success(fyers, broker):
     engine.paper_mode = True
 
     # Assign to scheduler (thread-safe global)
-    sched = globals().get("_scheduler_singleton")
+    sched = st.session_state.get("scheduler")
     if sched:
         sched.engine = engine
         sched.fyers  = fyers
@@ -291,7 +291,7 @@ if not creds_ok:
 # ─────────────────────────────────────────────────────────────────────────────
 tab_dash, tab_config, tab_log, tab_codelog = st.tabs(["Dashboard", "Config", "Log", "Code Log"])
 
-sched   = globals().get("_scheduler_singleton")
+sched   = st.session_state.get("scheduler")
 engine  = sched.engine if sched else None
 fyers   = sched.fyers  if sched else None
 broker  = sched.broker if sched else None
@@ -328,21 +328,18 @@ with tab_dash:
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
     with mb1:
         if st.button("Re-login now", use_container_width=True):
-            sched = globals().get("_scheduler_singleton") or st.session_state.get("scheduler")
-            st.write(f"DEBUG: sched = {sched}, globals = {globals().get('_scheduler_singleton')}, session = {st.session_state.get('scheduler')}")
+            sched = st.session_state.get("scheduler")
             if sched:
                 clear_all_caches()
                 sched.trigger_login_now()
-                st.success("Login triggered")
-            else:
-                st.error("Scheduler not found")
-
+                st.toast("Login started (check Code Log in 10s)")
     with mb2:
         if st.button("Clear cache", use_container_width=True):
             clear_all_caches()
+            st.toast("Cache cleared.")
     with mb3:
         if st.button("↻ Refresh", use_container_width=True):
-            pass  # clicking just triggers a rerun naturally
+            st.rerun()
 
     # ── Engine controls ───────────────────────────────────────────────────────
     st.markdown("<div class='sh'>Engine</div>", unsafe_allow_html=True)
