@@ -291,11 +291,10 @@ if not creds_ok:
 # ─────────────────────────────────────────────────────────────────────────────
 tab_dash, tab_config, tab_log, tab_codelog = st.tabs(["Dashboard", "Config", "Log", "Code Log"])
 
-engine  = st.session_state.engine
-fyers   = st.session_state.fyers
-broker  = st.session_state.broker
-sched   = st.session_state.scheduler
 sched   = globals().get("_scheduler_singleton")
+engine  = sched.engine if sched else None
+fyers   = sched.fyers  if sched else None
+broker  = sched.broker if sched else None
 fy_ok   = sched.fy_connected if sched else False
 zd_ok   = sched.zd_connected if sched else False
 ws_ok   = fyers.connected if fyers else False
@@ -322,8 +321,8 @@ with tab_dash:
     _pill(cc3, "Live feed",   ws_ok, "Live", "Offline")
     _pill(cc4, "Scheduler",   sched and sched.running, "Running")
 
-    if st.session_state.login_error:
-        st.error(f"Login error: {st.session_state.login_error}")
+    if sched and sched.login_error:
+        st.error(f"Login error: {sched.login_error}")
 
     # Manual buttons
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
