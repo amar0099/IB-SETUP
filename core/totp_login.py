@@ -223,7 +223,12 @@ def _zerodha_login(
             if sess_id:
                 r3b = sess.post(
                     "https://kite.zerodha.com/connect/authorize",
-                    data={"api_key": api_key, "sess_id": sess_id},
+                    data={
+                        "api_key":      api_key,
+                        "sess_id":      sess_id,
+                        "redirect_uri": "http://127.0.0.1:8080/",
+                        "checksum":     hashlib.sha256(f"{api_key}{sess_id}".encode()).hexdigest(),
+                    },
                     allow_redirects=True, timeout=10,
                 )
                 _s(f"Zerodha post-authorize URL: {r3b.url}")
