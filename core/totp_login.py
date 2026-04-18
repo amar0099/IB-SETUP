@@ -134,15 +134,22 @@ def _fyers_login(
             return None, f"Fyers step 3 failed: {r3d}"
 
         # Step 4 — get auth code
+        # app_id_short = prefix only (e.g. "XXXX" from "XXXX-100") — used in Step 4 payload
+        # client_id    = full string (e.g. "XXXX-100") — used in Step 5 hash
         _s("Fyers 4/5 — fetching auth code…")
-        app_id = client_id.split("-")[0]
+        app_id_short = client_id.split("-")[0]
         r4 = sess.post(
             "https://api-t1.fyers.in/api/v3/token",
             json={
-                "fyers_id": username, "app_id": app_id,
-                "redirect_uri": redirect_uri, "appType": "100",
-                "code_challenge": "", "state": "algo",
-                "scope": "", "nonce": "", "response_type": "code",
+                "fyers_id": username,
+                "app_id":   app_id_short,
+                "redirect_uri": redirect_uri,
+                "appType": "100",
+                "code_challenge": "",
+                "state": "algo",
+                "scope": "",
+                "nonce": "",
+                "response_type": "code",
                 "create_cookie": True,
             },
             headers={"Authorization": f"Bearer {r3d['data']['access_token']}"},
@@ -162,8 +169,9 @@ def _fyers_login(
             return None, f"Fyers step 4: no auth_code in {r4d}"
 
         # Step 5 — exchange for access token
+        # Hash uses app_id_short:secret_key
         _s("Fyers 5/5 — exchanging for access token…")
-        app_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+        app_hash = hashlib.sha256(f"{app_id_short}:{secret_key}".encode()).hexdigest()
         r5 = sess.post(
             "https://api-t1.fyers.in/api/v3/validate-authcode",
             json={"grant_type": "authorization_code",
