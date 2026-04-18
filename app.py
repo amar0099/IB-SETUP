@@ -327,22 +327,17 @@ with tab_dash:
     # Manual buttons
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
     with mb1:
-      if st.button("Re-login now", use_container_width=True):
-          sched = globals().get("_scheduler_singleton")
-          if sched:
-              with st.spinner("Logging in..."):
-                  clear_all_caches()
-                  sched.trigger_login_now()
-                  st.success("Re-login triggered. Check Code Log tab for progress.")
-
+        if st.button("Re-login now", use_container_width=True):
+            sched = globals().get("_scheduler_singleton")
+            if sched:
+                clear_all_caches()
+                sched.trigger_login_now()
     with mb2:
         if st.button("Clear cache", use_container_width=True):
             clear_all_caches()
-            st.toast("Cache cleared.")
     with mb3:
-        if st.button("↻ Refresh status", use_container_width=True):
-            st.toast("Refreshing...")
-            st.rerun()
+        if st.button("↻ Refresh", use_container_width=True):
+            pass  # clicking just triggers a rerun naturally
 
     # ── Engine controls ───────────────────────────────────────────────────────
     st.markdown("<div class='sh'>Engine</div>", unsafe_allow_html=True)
