@@ -233,7 +233,7 @@ def _zerodha_login(
                 # the final URL (r3b.url) contains the request_token.
                 final_url = r3b.url
                 location  = r3b.headers.get("Location", "")
-                _s(f"Zerodha authorize: status={r3b.status_code} final_url={final_url} location={location}")
+                _s(f"Zerodha authorize: status={r3b.status_code} final_url={final_url} location={location} body_snippet={r3b.text[:500]}")
                 for candidate in (final_url, location):
                     if candidate:
                         _parsed = urlparse(candidate)
