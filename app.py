@@ -299,6 +299,11 @@ if not creds_ok:
 tab_dash, tab_config, tab_log, tab_codelog = st.tabs(["Dashboard", "Config", "Log", "Code Log"])
 
 sched   = st.session_state.get("scheduler")
+if not sched:
+    # Scheduler not ready - show minimal UI
+    st.info("Waiting for scheduler to initialize...")
+    st.stop()
+
 engine  = sched.engine if sched else None
 fyers   = sched.fyers  if sched else None
 broker  = sched.broker if sched else None
