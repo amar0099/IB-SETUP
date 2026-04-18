@@ -350,6 +350,19 @@ with tab_dash:
 
     # ── Engine controls ───────────────────────────────────────────────────────
     st.markdown("<div class='sh'>Engine</div>", unsafe_allow_html=True)
+    
+    # DEBUG: Manual engine creation
+    if not engine and broker and fyers:
+        if st.button("⚠ Create engine manually", type="secondary"):
+            from core.engine import AlgoEngine
+            engine = AlgoEngine(fyers, broker)
+            engine.index = "NIFTY"
+            engine.lots = 1
+            sched = st.session_state.get("scheduler")
+            if sched:
+                sched.engine = engine
+            st.success("Engine created")
+            st.rerun()
 
     eng_running = engine and engine.running
     b1, b2, b3, _ = st.columns([1, 1, 1.2, 3])
