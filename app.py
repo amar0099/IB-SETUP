@@ -328,14 +328,14 @@ with tab_dash:
     mb1, mb2, mb3, _ = st.columns([1, 1, 1, 3])
     with mb1:
         if st.button("Re-login now", use_container_width=True):
-            sched = globals().get("_scheduler_singleton")
-            st.write(f"DEBUG: sched = {sched}, type = {type(sched)}")
+            sched = globals().get("_scheduler_singleton") or st.session_state.get("scheduler")
+            st.write(f"DEBUG: sched = {sched}, globals = {globals().get('_scheduler_singleton')}, session = {st.session_state.get('scheduler')}")
             if sched:
                 clear_all_caches()
                 sched.trigger_login_now()
                 st.success("Login triggered")
             else:
-                st.error("Scheduler not found in globals()")
+                st.error("Scheduler not found")
 
     with mb2:
         if st.button("Clear cache", use_container_width=True):
