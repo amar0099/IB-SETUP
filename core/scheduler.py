@@ -175,6 +175,9 @@ class DailyScheduler:
             self.broker = broker
 
             self._login_retries = 0
+            self.fy_connected = True
+            self.zd_connected = True
+            self.login_error  = ""
             self._log("INFO", "Both brokers connected successfully.")
             self._on_login_success(fyers, broker)
           
