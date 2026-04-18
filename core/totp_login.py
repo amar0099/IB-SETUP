@@ -224,12 +224,12 @@ def _zerodha_login(
                     f"https://kite.zerodha.com/connect/authorize?api_key={api_key}&sess_id={sess_id}",
                     allow_redirects=False, timeout=10,
                 )
-                _s(f"Zerodha authorize: status={r3b.status_code} location={r3b.headers.get('Location','none')}")
-                redirect_url = r3b.headers.get("Location", "")
+                location  = r3b.headers.get("Location", "")
+                _s(f"Zerodha authorize: status={r3b.status_code} location={location} body={r3b.text[:300]}")
+                redirect_url = location
                 parsed    = urlparse(redirect_url)
                 params    = parse_qs(parsed.query)
                 req_token = params.get("request_token", [None])[0]
-        
 
         # Step 4 — exchange for access token
         _s("Zerodha 4/4 — generating access token…")
