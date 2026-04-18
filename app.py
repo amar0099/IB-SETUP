@@ -334,8 +334,6 @@ with tab_dash:
           if sched:
               clear_all_caches()
               sched.trigger_login_now()
-              st.toast("Re-login triggered…")
-              _t.sleep(8)  # wait for login to complete
               st.rerun()
           
     with mb2:
