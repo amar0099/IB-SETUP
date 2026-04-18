@@ -295,8 +295,9 @@ engine  = st.session_state.engine
 fyers   = st.session_state.fyers
 broker  = st.session_state.broker
 sched   = st.session_state.scheduler
-fy_ok   = st.session_state.fy_connected
-zd_ok   = st.session_state.zd_connected
+sched   = globals().get("_scheduler_singleton")
+fy_ok   = sched.fy_connected if sched else False
+zd_ok   = sched.zd_connected if sched else False
 ws_ok   = fyers.connected if fyers else False
 
 # ═════════════════════════════════════════════════════════════════════════════
