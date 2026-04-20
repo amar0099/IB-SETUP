@@ -105,6 +105,13 @@ class AlgoEngine:
                     continue
 
                 if not self.fyers.connected:
+                    # Try a test REST call to verify token works
+                    try:
+                        ltp = self.fyers.get_ltp(self.index)
+                        if ltp:
+                            self._log("INFO", f"Fyers REST working: {self.index} LTP = {ltp}")
+                    except Exception as e:
+                        self._log("ERROR", f"Fyers REST failed: {e}")
                     self._log("INFO", "Waiting for Fyers WS feed…")
                     time_mod.sleep(5)
                     continue
