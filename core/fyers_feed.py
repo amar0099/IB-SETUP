@@ -205,7 +205,7 @@ class FyersFeed:
         except Exception as e:
             print(f"[FYERS WS] FATAL: Import failed - {e}")
             return
-    
+
         def _on_message(msg):
             print(f"[FYERS WS] Message received: {type(msg)}")
             if not isinstance(msg, list):
