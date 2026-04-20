@@ -191,10 +191,103 @@ class FyersFeed:
                 pass
         self._connected = False
 
+    #def _run_websocket(self):
+    #    """Internal: connect and keep the WS alive with reconnect logic."""
+    #    from fyers_apiv3.FyersWebsocket import data_ws
+
     def _run_websocket(self):
         """Internal: connect and keep the WS alive with reconnect logic."""
-        from fyers_apiv3.FyersWebsocket import data_ws
+        print("[FYERS WS] Thread started!")
+        
+        try:
+            from fyers_apiv3.FyersWebsocket import data_ws
+            print("[FYERS WS] Successfully imported data_ws")
+        except Exception as e:
+            print(f"[FYERS WS] FATAL: Import failed - {e}")
+            return
+    
+        def _on_message(msg):
+            print(f"[FYERS WS] Message received: {type(msg)}")
+            if not isinstance(msg, list):
+                return
+            for tick in msg:
+                sym = tick.get("symbol") or tick.get("s", "")
+                ltp = tick.get("ltp") or tick.get("last_price")
+                ts_raw = tick.get("timestamp") or tick.get("exchange_timestamp")
+                if ltp is None:
+                    continue
+                ts = (
+                    datetime.fromtimestamp(ts_raw, tz=IST)
+                    if isinstance(ts_raw, (int, float))
+                    else datetime.now(IST)
+                )
+                # route to the matching builder
+                for index, fsym in FYERS_SYMBOLS.items():
+                    if fsym == sym:
+                        self._builders[index].on_tick(float(ltp), ts)
+                # fire any registered callbacks
+                for cb in self._on_tick_callbacks:
+                    try:
+                        cb(sym, float(ltp), ts)
+                    except Exception:
+                        pass
 
+    def _on_error(msg):
+        print(f"[FYERS WS] ERROR: {msg}")
+        self._connected = False
+
+    def _on_close(msg):
+        print(f"[FYERS WS] CLOSE: {msg}")
+        self._connected = False
+
+    def _on_open():
+        print(f"[FYERS WS] OPEN - Connected! Subscribing to {self._tracked}")
+        self._connected = True
+        try:
+            self._ws.subscribe(symbols=self._tracked, data_type="SymbolUpdate")
+            print(f"[FYERS WS] Subscribe called successfully")
+        except Exception as e:
+            print(f"[FYERS WS] Subscribe failed: {e}")
+
+    attempt = 0
+    while not self._stop_flag.is_set():
+        attempt += 1
+        try:
+            token = f"{self.app_id}:{self.access_token}"
+            print(f"[FYERS WS] Attempt #{attempt}")
+            print(f"[FYERS WS] Token format: {self.app_id[:15]}***:{self.access_token[:8]}***")
+            print(f"[FYERS WS] Symbols to track: {self._tracked}")
+            
+            self._ws = data_ws.FyersDataSocket(
+                access_token=token,
+                log_path="",
+                litemode=False,
+                write_to_file=False,
+                reconnect=True,
+                on_connect=_on_open,
+                on_close=_on_close,
+                on_error=_on_error,
+                on_message=_on_message,
+            )
+            
+            print("[FYERS WS] Calling connect()...")
+            self._ws.connect()
+            print("[FYERS WS] connect() returned")
+            
+        except Exception as e:
+            print(f"[FYERS WS] EXCEPTION: {e}")
+            import traceback
+            traceback.print_exc()
+
+        if not self._stop_flag.is_set():
+            print("[FYERS WS] Reconnecting in 5 seconds...")
+            time_mod.sleep(5)
+    
+    print("[FYERS WS] Thread stopped")
+
+
+
+  
         def _on_message(msg):
             # msg is a list of tick dicts from Fyers v3
             if not isinstance(msg, list):
