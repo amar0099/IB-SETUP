@@ -222,12 +222,14 @@ class FyersFeed:
                         pass
 
         def _on_error(msg):
+            print(f"[FYERS WS ERROR] {msg}")  # This will show in Streamlit Cloud logs
             self._connected = False
 
         def _on_close(msg):
             self._connected = False
 
         def _on_open():
+            print(f"[FYERS WS OPEN] Connected! Subscribing to {self._tracked}")
             self._connected = True
             self._ws.subscribe(symbols=self._tracked, data_type="SymbolUpdate")
 
@@ -246,8 +248,9 @@ class FyersFeed:
                 )
                 self._ws.connect()
                 # connect() blocks until disconnect; loop will reconnect
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[FYERS WS EXCEPTION] {e}")
+
             if not self._stop_flag.is_set():
                 time_mod.sleep(5)   # wait before reconnect
 
