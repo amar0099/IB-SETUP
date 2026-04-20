@@ -24,8 +24,8 @@ from .broker     import ZerodhaClient, LOT_SIZE, EXCHANGE
 from .fyers_feed import FyersFeed
 
 IST          = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN  = time(9, 15)
-MARKET_CLOSE = time(15, 30)
+MARKET_OPEN  = time(0, 0)
+MARKET_CLOSE = time(0, 0)
 POLL_INTERVAL = 10   # seconds between engine ticks
 
 
