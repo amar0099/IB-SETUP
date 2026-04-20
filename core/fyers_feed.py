@@ -221,11 +221,26 @@ class FyersFeed:
                     except Exception:
                         pass
 
+        #def _on_error(msg):
+        #    print(f"[FYERS WS ERROR] {msg}")  # This will show in Streamlit Cloud logs
+        #    self._connected = False
+        
         def _on_error(msg):
-            print(f"[FYERS WS ERROR] {msg}")  # This will show in Streamlit Cloud logs
+            print(f"[FYERS WS ERROR] {msg}")
+            # Log the full error details
+            import json
+            if isinstance(msg, dict):
+                print(f"[FYERS WS ERROR DETAIL] {json.dumps(msg, indent=2)}")
             self._connected = False
 
+
+        #def _on_close(msg):
+            #self._connected = False
         def _on_close(msg):
+            print(f"[FYERS WS CLOSE] {msg}")
+            import json
+            if isinstance(msg, dict):
+                print(f"[FYERS WS CLOSE DETAIL] {json.dumps(msg, indent=2)}")
             self._connected = False
 
         def _on_open():
