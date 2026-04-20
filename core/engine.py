@@ -67,20 +67,34 @@ class AlgoEngine:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
-        try:
-            self._log("INFO", f"Starting Fyers WebSocket for {self.index}...")
-            self.fyers.start_feed([self.index])
-            self._log("INFO", "Fyers WebSocket started")
-        except Exception as e:
-            self._log("ERROR", f"Fyers WebSocket failed: {e}")
-        self._stop_flag.clear()
         
+        # Only start feed if not already running
+        if not self.fyers.connected:
+            try:
+                print("[ENGINE] Starting Fyers WebSocket...")
+                self.fyers.start_feed([self.index])
+                # Wait for connection to establish
+                import time as _t
+                for i in range(10):
+                    if self.fyers.connected:
+                        print("[ENGINE] WebSocket connected!")
+                        break
+                    _t.sleep(0.5)
+                if not self.fyers.connected:
+                    self._log("WARN", "WebSocket not connected after 5s, proceeding anyway")
+            except Exception as e:
+                self._log("ERROR", f"Fyers WebSocket failed: {e}")
+        else:
+            print("[ENGINE] WebSocket already connected")
+        
+        self._stop_flag.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="AlgoEngine"
         )
         self._thread.start()
         self._log("INFO",
             f"Algo started | data: Fyers WS | orders: Zerodha | {self.index}")
+
 
     def stop(self):
         self._stop_flag.set()
