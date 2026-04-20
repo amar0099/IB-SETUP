@@ -396,6 +396,14 @@ with tab_dash:
                      help="Push config changes to running engine"):
             if engine:
                 engine.index      = st.session_state.algo_index
+
+                # Also update broker connections if they were refreshed
+                if fyers:
+                    engine.fyers = fyers
+                if broker:
+                    engine.broker = broker
+                st.success("Config + connections updated")
+              
                 engine.lots       = st.session_state.algo_lots
                 engine.pe_offset  = st.session_state.algo_pe_offset
                 engine.ce_offset  = st.session_state.algo_ce_offset
