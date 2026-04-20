@@ -67,8 +67,14 @@ class AlgoEngine:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
-        self.fyers.start_feed([self.index])
+        try:
+            self._log("INFO", f"Starting Fyers WebSocket for {self.index}...")
+            self.fyers.start_feed([self.index])
+            self._log("INFO", "Fyers WebSocket started")
+        except Exception as e:
+            self._log("ERROR", f"Fyers WebSocket failed: {e}")
         self._stop_flag.clear()
+        
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="AlgoEngine"
         )
