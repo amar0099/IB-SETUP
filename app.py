@@ -376,13 +376,17 @@ with tab_dash:
     with b1:
         if st.button("▶ Start", use_container_width=True,
                      disabled=(not engine) or eng_running or not st.session_state.algo_expiry):
+            import logging
+            logging.info(f"START BUTTON CLICKED - engine={engine}, expiry={st.session_state.algo_expiry}")
             engine.expiry     = st.session_state.algo_expiry
             engine.index      = st.session_state.algo_index
             engine.lots       = st.session_state.algo_lots
             engine.pe_offset  = st.session_state.algo_pe_offset
             engine.ce_offset  = st.session_state.algo_ce_offset
             engine.paper_mode = st.session_state.algo_paper_mode
+            logging.info("About to call engine.start()")
             engine.start()
+            logging.info("engine.start() completed")
             st.rerun()
 
     with b2:
