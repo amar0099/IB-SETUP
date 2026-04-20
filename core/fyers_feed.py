@@ -155,37 +155,65 @@ class FyersFeed:
         return self._connected and (self._ws_thread is not None) and self._ws_thread.is_alive()
 
     # ── WebSocket feed ────────────────────────────────────────────────────────
-
+  
     def start_feed(self, indices: list[str]):
-        """Start the Fyers WebSocket in a background thread."""
+        """Start REST polling in a background thread (WebSocket blocked on cloud)."""
         if self._ws_thread and self._ws_thread.is_alive():
             return
         self._stop_flag.clear()
-        self._tracked = [FYERS_SYMBOLS[i] for i in indices if i in FYERS_SYMBOLS]
+        self._tracked_indices = [i for i in indices if i in FYERS_SYMBOLS]
         self._ws_thread = threading.Thread(
-            target=self._run_websocket, daemon=True, name="FyersWS"
+            target=self._run_rest_poll, daemon=True, name="FyersREST"
         )
         self._ws_thread.start()
-
+    
     def stop_feed(self):
         self._stop_flag.set()
-        if self._ws:
-            try:
-                self._ws.close_connection()
-            except Exception:
-                pass
         self._connected = False
-
-    def _run_websocket(self):
-        """Internal: connect and keep the WS alive with reconnect logic."""
-        print("[FYERS WS] Thread started!")
-
-        try:
-            from fyers_apiv3.FyersWebsocket import data_ws
-            print("[FYERS WS] Successfully imported data_ws")
-        except Exception as e:
-            print(f"[FYERS WS] FATAL: Import failed - {e}")
-            return
+    
+    def _run_rest_poll(self):
+        """Poll Fyers REST API every second instead of WebSocket."""
+        print("[FYERS REST] Polling thread started!")
+        
+        while not self._stop_flag.is_set():
+            try:
+                symbols = ",".join(FYERS_SYMBOLS[i] for i in self._tracked_indices)
+                headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
+                resp = requests.get(
+                    "https://api-t1.fyers.in/api/v3/quotes",
+                    params={"symbols": symbols},
+                    headers=headers,
+                    timeout=5,
+                )
+                data = resp.json()
+                if data.get("s") == "ok":
+                    self._connected = True
+                    for item in data.get("d", []):
+                        sym = item.get("n", "")
+                        ltp = item.get("v", {}).get("lp")
+                        if ltp is None:
+                            continue
+                        ts = datetime.now(IST)
+                        for index, fsym in FYERS_SYMBOLS.items():
+                            if fsym == sym:
+                                self._builders[index].on_tick(float(ltp), ts)
+                        for cb in self._on_tick_callbacks:
+                            try:
+                                cb(sym, float(ltp), ts)
+                            except Exception:
+                                pass
+                else:
+                    print(f"[FYERS REST] Error response: {data}")
+                    self._connected = False
+    
+            except Exception as e:
+                print(f"[FYERS REST] Exception: {e}")
+                self._connected = False
+    
+            time_mod.sleep(1)  # Poll every 1 second
+        
+        print("[FYERS REST] Polling thread stopped")
+        self._connected = False
 
         def _on_message(msg):
             print(f"[FYERS WS] Message received: {type(msg)}")
