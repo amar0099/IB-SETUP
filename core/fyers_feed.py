@@ -236,7 +236,7 @@ class FyersFeed:
         while not self._stop_flag.is_set():
             try:
                 self._ws = data_ws.FyersDataSocket(
-                    access_token=f"{self.app_id}:{self.access_token}"  # ✅ CORRECT
+                    access_token=f"{self.app_id}:{self.access_token}",
                     log_path="",
                     litemode=False,
                     write_to_file=False,
