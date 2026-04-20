@@ -20,7 +20,6 @@ import requests
 IST = pytz.timezone("Asia/Kolkata")
 
 # ── Fyers symbol map ──────────────────────────────────────────────────────────
-# Fyers uses NSE:NIFTY50-INDEX and NSE:NIFTYBANK-INDEX for indices
 FYERS_SYMBOLS = {
     "NIFTY":     "NSE:NIFTY50-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
@@ -39,9 +38,7 @@ class CandleBuilder:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self._lock  = threading.Lock()
-        # {interval_minutes: [{"datetime", "open", "high", "low", "close", "volume"}]}
         self._candles: dict[int, list[dict]] = {i: [] for i in INTERVALS}
-        # {interval_minutes: current partial candle or None}
         self._current: dict[int, Optional[dict]] = {i: None for i in INTERVALS}
 
     def on_tick(self, ltp: float, ts: datetime):
@@ -55,13 +52,10 @@ class CandleBuilder:
         with self._lock:
             cur = self._current[interval]
             if cur is None or cur["datetime"] != bucket:
-                # close the previous candle
                 if cur is not None:
                     self._candles[interval].append(cur)
-                    # keep only last 200 closed candles
                     if len(self._candles[interval]) > 200:
                         self._candles[interval] = self._candles[interval][-200:]
-                # open a new candle
                 self._current[interval] = {
                     "datetime": bucket,
                     "open":     ltp,
@@ -76,10 +70,6 @@ class CandleBuilder:
                 cur["close"] = ltp
 
     def get_candles(self, interval: int, include_partial: bool = False) -> pd.DataFrame:
-        """
-        Returns a DataFrame of closed candles for the given interval.
-        If include_partial=True, appends the current unfinished candle.
-        """
         with self._lock:
             rows = list(self._candles[interval])
             if include_partial and self._current[interval]:
@@ -95,7 +85,6 @@ class CandleBuilder:
 
     @staticmethod
     def _bucket_start(ts: datetime, interval: int) -> datetime:
-        """Floor ts to the nearest interval-minute boundary."""
         total_minutes = ts.hour * 60 + ts.minute
         floored = (total_minutes // interval) * interval
         h, m = divmod(floored, 60)
@@ -120,14 +109,12 @@ class FyersFeed:
         self._on_tick_callbacks: list[Callable] = []
         self._connected   = False
 
-        # initialise builders for supported indices
         for index in FYERS_SYMBOLS:
             self._builders[index] = CandleBuilder(FYERS_SYMBOLS[index])
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
     def login_url(self, redirect_uri: str = None) -> str:
-        """Return the Fyers OAuth URL the user should open in a browser."""
         redir = redirect_uri or self.redirect_uri
         state = "ib_algo"
         url = (
@@ -140,12 +127,10 @@ class FyersFeed:
         return url
 
     def complete_login(self, auth_code: str) -> str:
-        """Exchange auth_code for access_token. Returns access_token."""
         import hashlib
         checksum = hashlib.sha256(
             f"{self.app_id}:{self.secret_key}".encode()
         ).hexdigest()
-
         payload = {
             "grant_type":  "authorization_code",
             "appIdHash":   checksum,
@@ -191,14 +176,10 @@ class FyersFeed:
                 pass
         self._connected = False
 
-    #def _run_websocket(self):
-    #    """Internal: connect and keep the WS alive with reconnect logic."""
-    #    from fyers_apiv3.FyersWebsocket import data_ws
-
     def _run_websocket(self):
         """Internal: connect and keep the WS alive with reconnect logic."""
         print("[FYERS WS] Thread started!")
-        
+
         try:
             from fyers_apiv3.FyersWebsocket import data_ws
             print("[FYERS WS] Successfully imported data_ws")
@@ -221,77 +202,71 @@ class FyersFeed:
                     if isinstance(ts_raw, (int, float))
                     else datetime.now(IST)
                 )
-                # route to the matching builder
                 for index, fsym in FYERS_SYMBOLS.items():
                     if fsym == sym:
                         self._builders[index].on_tick(float(ltp), ts)
-                # fire any registered callbacks
                 for cb in self._on_tick_callbacks:
                     try:
                         cb(sym, float(ltp), ts)
                     except Exception:
                         pass
 
-    def _on_error(msg):
-        print(f"[FYERS WS] ERROR: {msg}")
-        self._connected = False
+        def _on_error(msg):
+            print(f"[FYERS WS] ERROR: {msg}")
+            self._connected = False
 
-    def _on_close(msg):
-        print(f"[FYERS WS] CLOSE: {msg}")
-        self._connected = False
+        def _on_close(msg):
+            print(f"[FYERS WS] CLOSE: {msg}")
+            self._connected = False
 
-    def _on_open():
-        print(f"[FYERS WS] OPEN - Connected! Subscribing to {self._tracked}")
-        self._connected = True
-        try:
-            self._ws.subscribe(symbols=self._tracked, data_type="SymbolUpdate")
-            print(f"[FYERS WS] Subscribe called successfully")
-        except Exception as e:
-            print(f"[FYERS WS] Subscribe failed: {e}")
+        def _on_open():
+            print(f"[FYERS WS] OPEN - Connected! Subscribing to {self._tracked}")
+            self._connected = True
+            try:
+                self._ws.subscribe(symbols=self._tracked, data_type="SymbolUpdate")
+                print("[FYERS WS] Subscribe called successfully")
+            except Exception as e:
+                print(f"[FYERS WS] Subscribe failed: {e}")
 
-    attempt = 0
-    while not self._stop_flag.is_set():
-        attempt += 1
-        try:
-            token = f"{self.app_id}:{self.access_token}"
-            print(f"[FYERS WS] Attempt #{attempt}")
-            print(f"[FYERS WS] Token format: {self.app_id[:15]}***:{self.access_token[:8]}***")
-            print(f"[FYERS WS] Symbols to track: {self._tracked}")
-            
-            self._ws = data_ws.FyersDataSocket(
-                access_token=token,
-                log_path="",
-                litemode=False,
-                write_to_file=False,
-                reconnect=True,
-                on_connect=_on_open,
-                on_close=_on_close,
-                on_error=_on_error,
-                on_message=_on_message,
-            )
-            
-            print("[FYERS WS] Calling connect()...")
-            self._ws.connect()
-            print("[FYERS WS] connect() returned")
-            
-        except Exception as e:
-            print(f"[FYERS WS] EXCEPTION: {e}")
-            import traceback
-            traceback.print_exc()
+        attempt = 0
+        while not self._stop_flag.is_set():
+            attempt += 1
+            try:
+                token = f"{self.app_id}:{self.access_token}"
+                print(f"[FYERS WS] Attempt #{attempt}")
+                print(f"[FYERS WS] Token format: {self.app_id[:15]}***:{self.access_token[:8]}***")
+                print(f"[FYERS WS] Symbols to track: {self._tracked}")
 
-        if not self._stop_flag.is_set():
-            print("[FYERS WS] Reconnecting in 5 seconds...")
-            time_mod.sleep(5)
-    
-    print("[FYERS WS] Thread stopped")
+                self._ws = data_ws.FyersDataSocket(
+                    access_token=token,
+                    log_path="",
+                    litemode=False,
+                    write_to_file=False,
+                    reconnect=True,
+                    on_connect=_on_open,
+                    on_close=_on_close,
+                    on_error=_on_error,
+                    on_message=_on_message,
+                )
+
+                print("[FYERS WS] Calling connect()...")
+                self._ws.connect()
+                print("[FYERS WS] connect() returned")
+
+            except Exception as e:
+                print(f"[FYERS WS] EXCEPTION: {e}")
+                import traceback
+                traceback.print_exc()
+
+            if not self._stop_flag.is_set():
+                print("[FYERS WS] Reconnecting in 5 seconds...")
+                time_mod.sleep(5)
+
+        print("[FYERS WS] Thread stopped")
 
     # ── Data access ───────────────────────────────────────────────────────────
 
     def get_candles(self, index: str, interval_minutes: int, include_partial: bool = False) -> pd.DataFrame:
-        """
-        Returns closed OHLCV candles for the given index and interval.
-        interval_minutes must be 1 or 15.
-        """
         builder = self._builders.get(index)
         if builder is None:
             return pd.DataFrame()
@@ -306,14 +281,9 @@ class FyersFeed:
         self._on_tick_callbacks.append(fn)
 
     def get_daily_closes(self, index: str, days: int = 30) -> pd.Series:
-        """
-        Fyers REST historical API — daily closes for EMA20.
-        Falls back to what we have from the live feed if REST fails.
-        """
         try:
             return self._fetch_daily_closes_rest(index, days)
         except Exception:
-            # graceful fallback: use 15-min closes compressed to daily
             df = self.get_candles(index, 15)
             if df.empty:
                 return pd.Series(dtype=float)
@@ -342,6 +312,5 @@ class FyersFeed:
         if data.get("s") != "ok":
             raise ValueError(data.get("message", "Fyers history error"))
         candles = data.get("candles", [])
-        # candles: [[epoch, o, h, l, c, v], ...]
         closes = pd.Series([c[4] for c in candles])
         return closes.reset_index(drop=True)
