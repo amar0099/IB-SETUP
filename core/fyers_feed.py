@@ -96,6 +96,7 @@ class FyersFeed:
         self._on_tick_callbacks: list[Callable] = []
         self._connected   = False
         self._tracked_indices: list[str] = []
+        self._log_cb: Optional[Callable] = None   # engine log callback
 
         for index in FYERS_SYMBOLS:
             self._builders[index] = CandleBuilder(FYERS_SYMBOLS[index])
@@ -156,7 +157,7 @@ class FyersFeed:
 
     def _run_rest_poll(self):
         """Poll /quotes every 1 second and push ticks into candle builders."""
-        print("[FYERS REST] Thread running")
+        self._log("INFO", "REST poll thread running")
         consecutive_errors = 0
 
         while not self._stop_flag.is_set():
@@ -172,10 +173,9 @@ class FyersFeed:
                 data = resp.json()
 
                 if data.get("s") == "ok":
+                    if consecutive_errors > 0:
+                        self._log("INFO", "REST poll recovered — receiving quotes")
                     consecutive_errors = 0
-                    if not self._connected:
-                        print("[FYERS REST] ✅ Connected — receiving quotes")
-                    self._connected = True
 
                     for item in data.get("d", []):
                         sym = item.get("n", "")
@@ -195,21 +195,18 @@ class FyersFeed:
                 else:
                     consecutive_errors += 1
                     msg = data.get("message", str(data))
-                    print(f"[FYERS REST] ❌ API error ({consecutive_errors}): {msg}")
-                    self._connected = False
-                    # Back off on repeated errors
+                    self._log("ERROR", f"Quotes API error: {msg}")
                     time_mod.sleep(min(consecutive_errors * 2, 30))
 
             except Exception as e:
                 consecutive_errors += 1
-                print(f"[FYERS REST] ❌ Exception ({consecutive_errors}): {e}")
-                self._connected = False
+                self._log("ERROR", f"REST poll exception: {e}")
                 time_mod.sleep(min(consecutive_errors * 2, 30))
                 continue
 
             time_mod.sleep(1)
 
-        print("[FYERS REST] Thread stopped")
+        self._log("INFO", "REST poll thread stopped")
         self._connected = False
 
     # ── Data access ───────────────────────────────────────────────────────────
@@ -226,6 +223,18 @@ class FyersFeed:
 
     def add_tick_callback(self, fn: Callable):
         self._on_tick_callbacks.append(fn)
+
+    def set_log_callback(self, fn: Callable):
+        """Set a callback(level, msg) to surface REST errors in the engine log."""
+        self._log_cb = fn
+
+    def _log(self, level: str, msg: str):
+        if self._log_cb:
+            try:
+                self._log_cb(level, msg)
+            except Exception:
+                pass
+        print(f"[FYERS REST] [{level}] {msg}")
 
     def get_daily_closes(self, index: str, days: int = 30) -> pd.Series:
         try:

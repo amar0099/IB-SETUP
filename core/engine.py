@@ -69,6 +69,7 @@ class AlgoEngine:
             return
 
         try:
+            self.fyers.set_log_callback(self._log)
             self.fyers.start_feed([self.index])
             self._log("INFO", f"Fyers REST feed started for {self.index}")
         except Exception as e:
@@ -109,6 +110,20 @@ class AlgoEngine:
                     self._log("INFO", "Waiting for Fyers REST feed…")
                     time_mod.sleep(5)
                     continue
+
+                # Diagnostic: log LTP every 30s so we know data is flowing
+                ltp = self.fyers.get_ltp(self.index)
+                if not hasattr(self, '_last_ltp_log'):
+                    self._last_ltp_log = 0
+                import time as _t2
+                if _t2.time() - self._last_ltp_log > 30:
+                    self._last_ltp_log = _t2.time()
+                    df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
+                    self._log("INFO",
+                        f"Feed check — LTP: {ltp or 'None'} | "
+                        f"1m candles: {len(df_1m)} | "
+                        f"connected: {self.fyers.connected}"
+                    )
 
                 self._tick(now)
             except Exception as e:
