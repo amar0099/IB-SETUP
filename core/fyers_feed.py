@@ -165,7 +165,7 @@ class FyersFeed:
                 symbols = ",".join(FYERS_SYMBOLS[i] for i in self._tracked_indices)
                 headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
                 resp = requests.get(
-                    "https://api-t1.fyers.in/api/v3/quotes",
+                    "https://api-t1.fyers.in/data/quotes",
                     params={"symbols": symbols},
                     headers=headers,
                     timeout=5,
