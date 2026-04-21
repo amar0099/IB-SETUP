@@ -147,10 +147,32 @@ def _fyers_login(
         if r4d.get("s") != "ok":
             return None, f"Fyers step 4 failed: {r4d}"
 
-        # API returns access_token directly in data.auth
-        token = r4d.get("data", {}).get("auth")
+        # Step 4 returns auth_code in data.auth — must exchange for access_token
+        auth_code = r4d.get("data", {}).get("auth")
+        if not auth_code:
+            return None, f"Fyers step 4: no auth code in response: {r4d}"
+
+        # Step 5 — exchange auth_code for final access_token
+        _s("Fyers 5/5 — exchanging auth code for access token…")
+        checksum = hashlib.sha256(
+            f"{client_id}:{secret_key}".encode()
+        ).hexdigest()
+        r5 = sess.post(
+            "https://api-t1.fyers.in/api/v3/validate-authcode",
+            json={
+                "grant_type": "authorization_code",
+                "appIdHash":  checksum,
+                "code":       auth_code,
+            },
+            timeout=10,
+        )
+        r5d = r5.json()
+        if r5d.get("s") != "ok":
+            return None, f"Fyers step 5 failed: {r5d}"
+
+        token = r5d.get("access_token")
         if not token:
-            return None, f"Fyers step 4: no token in response: {r4d}"
+            return None, f"Fyers step 5: no access_token in response: {r5d}"
 
         _s("Fyers login complete.")
         return token, None
