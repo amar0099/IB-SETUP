@@ -164,7 +164,6 @@ class FyersFeed:
             client_id=self.app_id,
             token=self.access_token,
             log_path="",
-            is_async=False,
         )
         consecutive_errors = 0
 
