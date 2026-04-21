@@ -160,6 +160,12 @@ class FyersFeed:
         self._log("INFO", "REST poll thread running")
         from fyers_apiv3 import fyersModel
 
+        # Diagnostic: log token state
+        if not self.access_token:
+            self._log("ERROR", "access_token is None — login not completed")
+            return
+        self._log("INFO", f"Token check: app_id={self.app_id}, token_len={len(self.access_token)}, token_start={self.access_token[:10]}***")
+
         fyers_client = fyersModel.FyersModel(
             client_id=self.app_id,
             token=self.access_token,
