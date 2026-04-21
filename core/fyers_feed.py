@@ -170,7 +170,12 @@ class FyersFeed:
                     headers=headers,
                     timeout=5,
                 )
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except Exception:
+                    self._log("ERROR", f"Non-JSON response (status {resp.status_code}): {resp.text[:200]}")
+                    time_mod.sleep(5)
+                    continue
 
                 if data.get("s") == "ok":
                     if consecutive_errors > 0:
