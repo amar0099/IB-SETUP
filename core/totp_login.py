@@ -147,33 +147,16 @@ def _fyers_login(
         if r4d.get("s") != "ok":
             return None, f"Fyers step 4 failed: {r4d}"
 
-        # Step 4 returns auth_code in data.auth — must exchange for access_token
-        auth_code = r4d.get("data", {}).get("auth")
-        if not auth_code:
-            return None, f"Fyers step 4: no auth code in response: {r4d}"
+        # Log the full step 4 response to diagnose token format
+        _s(f"Fyers step 4 response keys: {list(r4d.get('data', {}).keys())}")
 
-        # Step 5 — exchange auth_code for final access_token
-        _s("Fyers 5/5 — exchanging auth code for access token…")
-        checksum = hashlib.sha256(
-            f"{client_id}:{secret_key}".encode()
-        ).hexdigest()
-        r5 = sess.post(
-            "https://api-t1.fyers.in/api/v3/validate-authcode",
-            json={
-                "grant_type": "authorization_code",
-                "appIdHash":  checksum,
-                "code":       auth_code,
-            },
-            timeout=10,
-        )
-        r5d = r5.json()
-        if r5d.get("s") != "ok":
-            return None, f"Fyers step 5 failed: {r5d}"
-
-        token = r5d.get("access_token")
+        # Try access_token first, then auth (different API versions use different keys)
+        data_section = r4d.get("data", {})
+        token = data_section.get("access_token") or data_section.get("auth")
         if not token:
-            return None, f"Fyers step 5: no access_token in response: {r5d}"
+            return None, f"Fyers step 4: no token in response: {r4d}"
 
+        _s(f"Fyers token obtained, length={len(token)}, starts={token[:6]}")
         _s("Fyers login complete.")
         return token, None
 
