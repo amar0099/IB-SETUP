@@ -133,7 +133,7 @@ class FyersFeed:
 
     @property
     def connected(self) -> bool:
-        return self._connected and (self._poll_thread is not None) and self._poll_thread.is_alive()
+        return (self._poll_thread is not None) and self._poll_thread.is_alive()
 
     # ── Feed (REST polling) ───────────────────────────────────────────────────
 
@@ -147,6 +147,7 @@ class FyersFeed:
             target=self._run_rest_poll, daemon=True, name="FyersREST"
         )
         self._poll_thread.start()
+        self._connected = True   # Mark connected immediately — thread is running
         print(f"[FYERS REST] Poll thread started for {self._tracked_indices}")
 
     def stop_feed(self):

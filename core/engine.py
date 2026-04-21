@@ -67,33 +67,20 @@ class AlgoEngine:
     def start(self):
         if self._thread and self._thread.is_alive():
             return
-        
-        # Only start feed if not already running
-        if not self.fyers.connected:
-            try:
-                print("[ENGINE] Starting Fyers WebSocket...")
-                self.fyers.start_feed([self.index])
-                # Wait for connection to establish
-                import time as _t
-                for i in range(10):
-                    if self.fyers.connected:
-                        print("[ENGINE] WebSocket connected!")
-                        break
-                    _t.sleep(0.5)
-                if not self.fyers.connected:
-                    self._log("WARN", "WebSocket not connected after 5s, proceeding anyway")
-            except Exception as e:
-                self._log("ERROR", f"Fyers WebSocket failed: {e}")
-        else:
-            print("[ENGINE] WebSocket already connected")
-        
+
+        try:
+            self.fyers.start_feed([self.index])
+            self._log("INFO", f"Fyers REST feed started for {self.index}")
+        except Exception as e:
+            self._log("ERROR", f"Fyers feed failed to start: {e}")
+
         self._stop_flag.clear()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="AlgoEngine"
         )
         self._thread.start()
         self._log("INFO",
-            f"Algo started | data: Fyers WS | orders: Zerodha | {self.index}")
+            f"Algo started | data: Fyers REST | orders: Zerodha | {self.index}")
 
 
     def stop(self):
@@ -119,14 +106,7 @@ class AlgoEngine:
                     continue
 
                 if not self.fyers.connected:
-                    # Try a test REST call to verify token works
-                    try:
-                        ltp = self.fyers.get_ltp(self.index)
-                        if ltp:
-                            self._log("INFO", f"Fyers REST working: {self.index} LTP = {ltp}")
-                    except Exception as e:
-                        self._log("ERROR", f"Fyers REST failed: {e}")
-                    self._log("INFO", "Waiting for Fyers WS feed…")
+                    self._log("INFO", "Waiting for Fyers REST feed…")
                     time_mod.sleep(5)
                     continue
 
