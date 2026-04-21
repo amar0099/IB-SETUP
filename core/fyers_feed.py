@@ -1,16 +1,13 @@
 """
 core/fyers_feed.py
 
-Fyers data layer:
-  - OAuth2 login (redirect flow, same pattern as Zerodha)
-  - WebSocket live tick feed for NIFTY 50 and NIFTY BANK
-  - In-memory candle builder: assembles 1-min and 15-min OHLCV bars from ticks
-  - Thread-safe: UI and engine read candles without blocking the WS thread
+Fyers data layer — REST polling edition.
+WebSocket is replaced with 1-second REST polling of the /quotes endpoint.
+This is required because Streamlit Cloud blocks outbound WebSocket connections.
 """
 
 import threading
 import time as time_mod
-from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 import pytz
@@ -19,30 +16,22 @@ import requests
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# ── Fyers symbol map ──────────────────────────────────────────────────────────
 FYERS_SYMBOLS = {
     "NIFTY":     "NSE:NIFTY50-INDEX",
     "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
 }
 
-# ── Candle intervals we track ─────────────────────────────────────────────────
 INTERVALS = [1, 15]   # minutes
 
 
 class CandleBuilder:
-    """
-    Builds OHLCV candles from a raw tick stream for one symbol.
-    Thread-safe (protects _candles with a lock).
-    """
-
     def __init__(self, symbol: str):
-        self.symbol = symbol
-        self._lock  = threading.Lock()
+        self.symbol   = symbol
+        self._lock    = threading.Lock()
         self._candles: dict[int, list[dict]] = {i: [] for i in INTERVALS}
         self._current: dict[int, Optional[dict]] = {i: None for i in INTERVALS}
 
     def on_tick(self, ltp: float, ts: datetime):
-        """Feed one tick into every interval's candle builder."""
         ts_ist = ts.astimezone(IST) if ts.tzinfo else IST.localize(ts)
         for interval in INTERVALS:
             self._update_interval(ltp, ts_ist, interval)
@@ -58,11 +47,9 @@ class CandleBuilder:
                         self._candles[interval] = self._candles[interval][-200:]
                 self._current[interval] = {
                     "datetime": bucket,
-                    "open":     ltp,
-                    "high":     ltp,
-                    "low":      ltp,
-                    "close":    ltp,
-                    "volume":   0,
+                    "open":  ltp, "high": ltp,
+                    "low":   ltp, "close": ltp,
+                    "volume": 0,
                 }
             else:
                 cur["high"]  = max(cur["high"], ltp)
@@ -93,8 +80,8 @@ class CandleBuilder:
 
 class FyersFeed:
     """
-    Manages Fyers OAuth login and the WebSocket live feed.
-    Exposes candle data via get_candles() for any tracked index.
+    Fyers data feed using REST polling (/quotes endpoint).
+    Polls every 1 second and feeds ticks into CandleBuilder.
     """
 
     def __init__(self, app_id: str, secret_key: str, redirect_uri: str = "http://127.0.0.1:8501"):
@@ -102,43 +89,37 @@ class FyersFeed:
         self.secret_key   = secret_key
         self.redirect_uri = redirect_uri
         self.access_token: Optional[str] = None
-        self._ws          = None
-        self._ws_thread: Optional[threading.Thread] = None
+
+        self._poll_thread: Optional[threading.Thread] = None
         self._stop_flag   = threading.Event()
         self._builders: dict[str, CandleBuilder] = {}
         self._on_tick_callbacks: list[Callable] = []
         self._connected   = False
+        self._tracked_indices: list[str] = []
 
         for index in FYERS_SYMBOLS:
             self._builders[index] = CandleBuilder(FYERS_SYMBOLS[index])
 
-    # ── Auth ─────────────────────────────────────────────────────────────────
+    # ── Auth ──────────────────────────────────────────────────────────────────
 
     def login_url(self, redirect_uri: str = None) -> str:
         redir = redirect_uri or self.redirect_uri
-        state = "ib_algo"
-        url = (
+        return (
             f"https://api-t1.fyers.in/api/v3/generate-authcode"
             f"?client_id={self.app_id}"
             f"&redirect_uri={redir}"
             f"&response_type=code"
-            f"&state={state}"
+            f"&state=ib_algo"
         )
-        return url
 
     def complete_login(self, auth_code: str) -> str:
         import hashlib
         checksum = hashlib.sha256(
             f"{self.app_id}:{self.secret_key}".encode()
         ).hexdigest()
-        payload = {
-            "grant_type":  "authorization_code",
-            "appIdHash":   checksum,
-            "code":        auth_code,
-        }
         resp = requests.post(
             "https://api-t1.fyers.in/api/v3/validate-authcode",
-            json=payload,
+            json={"grant_type": "authorization_code", "appIdHash": checksum, "code": auth_code},
             timeout=10,
         )
         data = resp.json()
@@ -152,29 +133,31 @@ class FyersFeed:
 
     @property
     def connected(self) -> bool:
-        return self._connected and (self._ws_thread is not None) and self._ws_thread.is_alive()
+        return self._connected and (self._poll_thread is not None) and self._poll_thread.is_alive()
 
-    # ── WebSocket feed ────────────────────────────────────────────────────────
-  
+    # ── Feed (REST polling) ───────────────────────────────────────────────────
+
     def start_feed(self, indices: list[str]):
-        """Start REST polling in a background thread (WebSocket blocked on cloud)."""
-        if self._ws_thread and self._ws_thread.is_alive():
+        """Start REST polling thread. Safe to call multiple times."""
+        if self._poll_thread and self._poll_thread.is_alive():
             return
         self._stop_flag.clear()
         self._tracked_indices = [i for i in indices if i in FYERS_SYMBOLS]
-        self._ws_thread = threading.Thread(
+        self._poll_thread = threading.Thread(
             target=self._run_rest_poll, daemon=True, name="FyersREST"
         )
-        self._ws_thread.start()
-    
+        self._poll_thread.start()
+        print(f"[FYERS REST] Poll thread started for {self._tracked_indices}")
+
     def stop_feed(self):
         self._stop_flag.set()
         self._connected = False
-    
+
     def _run_rest_poll(self):
-        """Poll Fyers REST API every second instead of WebSocket."""
-        print("[FYERS REST] Polling thread started!")
-        
+        """Poll /quotes every 1 second and push ticks into candle builders."""
+        print("[FYERS REST] Thread running")
+        consecutive_errors = 0
+
         while not self._stop_flag.is_set():
             try:
                 symbols = ",".join(FYERS_SYMBOLS[i] for i in self._tracked_indices)
@@ -186,11 +169,17 @@ class FyersFeed:
                     timeout=5,
                 )
                 data = resp.json()
+
                 if data.get("s") == "ok":
+                    consecutive_errors = 0
+                    if not self._connected:
+                        print("[FYERS REST] ✅ Connected — receiving quotes")
                     self._connected = True
+
                     for item in data.get("d", []):
                         sym = item.get("n", "")
-                        ltp = item.get("v", {}).get("lp")
+                        v   = item.get("v", {})
+                        ltp = v.get("lp") or v.get("last_price")
                         if ltp is None:
                             continue
                         ts = datetime.now(IST)
@@ -203,94 +192,24 @@ class FyersFeed:
                             except Exception:
                                 pass
                 else:
-                    print(f"[FYERS REST] Error response: {data}")
+                    consecutive_errors += 1
+                    msg = data.get("message", str(data))
+                    print(f"[FYERS REST] ❌ API error ({consecutive_errors}): {msg}")
                     self._connected = False
-    
+                    # Back off on repeated errors
+                    time_mod.sleep(min(consecutive_errors * 2, 30))
+
             except Exception as e:
-                print(f"[FYERS REST] Exception: {e}")
+                consecutive_errors += 1
+                print(f"[FYERS REST] ❌ Exception ({consecutive_errors}): {e}")
                 self._connected = False
-    
-            time_mod.sleep(1)  # Poll every 1 second
-        
-        print("[FYERS REST] Polling thread stopped")
+                time_mod.sleep(min(consecutive_errors * 2, 30))
+                continue
+
+            time_mod.sleep(1)
+
+        print("[FYERS REST] Thread stopped")
         self._connected = False
-
-        def _on_message(msg):
-            print(f"[FYERS WS] Message received: {type(msg)}")
-            if not isinstance(msg, list):
-                return
-            for tick in msg:
-                sym = tick.get("symbol") or tick.get("s", "")
-                ltp = tick.get("ltp") or tick.get("last_price")
-                ts_raw = tick.get("timestamp") or tick.get("exchange_timestamp")
-                if ltp is None:
-                    continue
-                ts = (
-                    datetime.fromtimestamp(ts_raw, tz=IST)
-                    if isinstance(ts_raw, (int, float))
-                    else datetime.now(IST)
-                )
-                for index, fsym in FYERS_SYMBOLS.items():
-                    if fsym == sym:
-                        self._builders[index].on_tick(float(ltp), ts)
-                for cb in self._on_tick_callbacks:
-                    try:
-                        cb(sym, float(ltp), ts)
-                    except Exception:
-                        pass
-
-        def _on_error(msg):
-            print(f"[FYERS WS] ERROR: {msg}")
-            self._connected = False
-
-        def _on_close(msg):
-            print(f"[FYERS WS] CLOSE: {msg}")
-            self._connected = False
-
-        def _on_open():
-            print(f"[FYERS WS] OPEN - Connected! Subscribing to {self._tracked}")
-            self._connected = True
-            try:
-                self._ws.subscribe(symbols=self._tracked, data_type="SymbolUpdate")
-                print("[FYERS WS] Subscribe called successfully")
-            except Exception as e:
-                print(f"[FYERS WS] Subscribe failed: {e}")
-
-        attempt = 0
-        while not self._stop_flag.is_set():
-            attempt += 1
-            try:
-                token = f"{self.app_id}:{self.access_token}"
-                print(f"[FYERS WS] Attempt #{attempt}")
-                print(f"[FYERS WS] Token format: {self.app_id[:15]}***:{self.access_token[:8]}***")
-                print(f"[FYERS WS] Symbols to track: {self._tracked}")
-
-                self._ws = data_ws.FyersDataSocket(
-                    access_token=token,
-                    log_path="",
-                    litemode=False,
-                    write_to_file=False,
-                    reconnect=True,
-                    on_connect=_on_open,
-                    on_close=_on_close,
-                    on_error=_on_error,
-                    on_message=_on_message,
-                )
-
-                print("[FYERS WS] Calling connect()...")
-                self._ws.connect()
-                print("[FYERS WS] connect() returned")
-
-            except Exception as e:
-                print(f"[FYERS WS] EXCEPTION: {e}")
-                import traceback
-                traceback.print_exc()
-
-            if not self._stop_flag.is_set():
-                print("[FYERS WS] Reconnecting in 5 seconds...")
-                time_mod.sleep(5)
-
-        print("[FYERS WS] Thread stopped")
 
     # ── Data access ───────────────────────────────────────────────────────────
 
@@ -305,7 +224,6 @@ class FyersFeed:
         return builder.latest_ltp() if builder else None
 
     def add_tick_callback(self, fn: Callable):
-        """Register fn(symbol, ltp, datetime) called on every tick."""
         self._on_tick_callbacks.append(fn)
 
     def get_daily_closes(self, index: str, days: int = 30) -> pd.Series:
@@ -318,21 +236,20 @@ class FyersFeed:
             return df["close"].reset_index(drop=True)
 
     def _fetch_daily_closes_rest(self, index: str, days: int) -> pd.Series:
-        symbol   = FYERS_SYMBOLS[index]
-        to_dt    = datetime.now(IST)
-        from_dt  = to_dt - timedelta(days=days + 10)
-        payload  = {
-            "symbol":      symbol,
-            "resolution":  "D",
-            "date_format": "1",
-            "range_from":  from_dt.strftime("%Y-%m-%d"),
-            "range_to":    to_dt.strftime("%Y-%m-%d"),
-            "cont_flag":   "1",
-        }
+        symbol  = FYERS_SYMBOLS[index]
+        to_dt   = datetime.now(IST)
+        from_dt = to_dt - timedelta(days=days + 10)
         headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
-        resp    = requests.get(
+        resp = requests.get(
             "https://api-t1.fyers.in/api/v3/history",
-            params=payload,
+            params={
+                "symbol":      symbol,
+                "resolution":  "D",
+                "date_format": "1",
+                "range_from":  from_dt.strftime("%Y-%m-%d"),
+                "range_to":    to_dt.strftime("%Y-%m-%d"),
+                "cont_flag":   "1",
+            },
             headers=headers,
             timeout=10,
         )
@@ -340,5 +257,4 @@ class FyersFeed:
         if data.get("s") != "ok":
             raise ValueError(data.get("message", "Fyers history error"))
         candles = data.get("candles", [])
-        closes = pd.Series([c[4] for c in candles])
-        return closes.reset_index(drop=True)
+        return pd.Series([c[4] for c in candles]).reset_index(drop=True)
