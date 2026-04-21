@@ -156,26 +156,22 @@ class FyersFeed:
         self._connected = False
 
     def _run_rest_poll(self):
-        """Poll /quotes every 1 second and push ticks into candle builders."""
+        """Poll quotes every 1 second using the Fyers SDK."""
         self._log("INFO", "REST poll thread running")
+        from fyers_apiv3 import fyersModel
+
+        fyers_client = fyersModel.FyersModel(
+            client_id=self.app_id,
+            token=self.access_token,
+            log_path="",
+            is_async=False,
+        )
         consecutive_errors = 0
 
         while not self._stop_flag.is_set():
             try:
                 symbols = ",".join(FYERS_SYMBOLS[i] for i in self._tracked_indices)
-                headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
-                resp = requests.get(
-                    "https://api-t1.fyers.in/data/quotes",
-                    params={"symbols": symbols},
-                    headers=headers,
-                    timeout=5,
-                )
-                try:
-                    data = resp.json()
-                except Exception:
-                    self._log("ERROR", f"Non-JSON response (status {resp.status_code}): {resp.text[:200]}")
-                    time_mod.sleep(5)
-                    continue
+                data = fyers_client.quotes({"symbols": symbols})
 
                 if data.get("s") == "ok":
                     if consecutive_errors > 0:
