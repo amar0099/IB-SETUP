@@ -120,9 +120,9 @@ def _fyers_login(
         if r3d.get("s") != "ok":
             return None, f"Fyers step 3 failed: {r3d}"
 
-        # Step 4 — get access token
+        # Step 4 — get auth_code (NOT the final access token)
         # appType = suffix of client_id (e.g. "100" from "XXXX-100")
-        _s("Fyers 4/4 — fetching access token…")
+        _s("Fyers 4/5 — fetching auth_code…")
         app_id   = client_id.split("-")[0]
         app_type = client_id.split("-")[-1]
 
@@ -142,21 +142,71 @@ def _fyers_login(
             },
             headers={"Authorization": f"Bearer {r3d['data']['access_token']}"},
             timeout=10,
+            allow_redirects=False,   # response may be a 308 redirect with auth_code in Url
         )
-        r4d   = r4.json()
-        if r4d.get("s") != "ok":
+        try:
+            r4d = r4.json()
+        except Exception:
+            return None, f"Fyers step 4: non-JSON response (status {r4.status_code}): {r4.text[:300]}"
+
+        if r4d.get("s") not in ("ok", None) and r4.status_code not in (200, 308):
             return None, f"Fyers step 4 failed: {r4d}"
 
-        # Log the full step 4 response to diagnose token format
-        _s(f"Fyers step 4 response keys: {list(r4d.get('data', {}).keys())}")
+        # Extract auth_code. Fyers v3 may return it in any of these shapes:
+        #   1) {"s":"ok","data":{"auth_code":"..."}}
+        #   2) {"s":"ok","auth_code":"..."}
+        #   3) {"Url":"https://.../redirect?auth_code=...&state=..."}   (308)
+        data_section = r4d.get("data", {}) if isinstance(r4d.get("data"), dict) else {}
+        auth_code = (
+            data_section.get("auth_code")
+            or r4d.get("auth_code")
+        )
+        if not auth_code:
+            redirect_url = (
+                r4d.get("Url") or r4d.get("url")
+                or data_section.get("Url") or data_section.get("url")
+            )
+            if redirect_url:
+                qs = parse_qs(urlparse(redirect_url).query)
+                if "auth_code" in qs:
+                    auth_code = qs["auth_code"][0]
 
-        # Try access_token first, then auth (different API versions use different keys)
-        data_section = r4d.get("data", {})
-        token = data_section.get("access_token") or data_section.get("auth")
+        if not auth_code:
+            return None, (
+                f"Fyers step 4: no auth_code in response. "
+                f"status={r4.status_code}, keys={list(r4d.keys())}, "
+                f"data_keys={list(data_section.keys())}"
+            )
+
+        _s(f"Fyers auth_code obtained, length={len(auth_code)}")
+
+        # Step 5 — exchange auth_code for access_token via /validate-authcode
+        # appIdHash uses the FULL client_id (e.g. "ABC-100"), not the split prefix.
+        _s("Fyers 5/5 — exchanging auth_code for access_token…")
+        app_id_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
+
+        r5 = sess.post(
+            "https://api-t1.fyers.in/api/v3/validate-authcode",
+            json={
+                "grant_type": "authorization_code",
+                "appIdHash":  app_id_hash,
+                "code":       auth_code,
+            },
+            timeout=10,
+        )
+        try:
+            r5d = r5.json()
+        except Exception:
+            return None, f"Fyers step 5: non-JSON response (status {r5.status_code}): {r5.text[:300]}"
+
+        if r5d.get("s") != "ok":
+            return None, f"Fyers step 5 failed: {r5d}"
+
+        token = r5d.get("access_token")
         if not token:
-            return None, f"Fyers step 4: no token in response: {r4d}"
+            return None, f"Fyers step 5: no access_token in response: {r5d}"
 
-        _s(f"Fyers token obtained, length={len(token)}, starts={token[:6]}")
+        _s(f"Fyers access_token obtained, length={len(token)}, starts={token[:6]}")
         _s("Fyers login complete.")
         return token, None
 
