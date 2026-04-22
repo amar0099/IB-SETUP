@@ -152,33 +152,40 @@ def _fyers_login(
         if r4d.get("s") not in ("ok", None) and r4.status_code not in (200, 308):
             return None, f"Fyers step 4 failed: {r4d}"
 
-        # Extract auth_code. Fyers v3 may return it in any of these shapes:
-        #   1) {"s":"ok","data":{"auth_code":"..."}}
-        #   2) {"s":"ok","auth_code":"..."}
-        #   3) {"Url":"https://.../redirect?auth_code=...&state=..."}   (308)
+        # Extract auth_code. Fyers v3 returns it in the `redirectUrl` field
+        # inside `data` — it is the URL that WOULD have been used to redirect
+        # the browser, with `?auth_code=...` in its query string.
+        # Other possible shapes are handled as fallbacks.
         data_section = r4d.get("data", {}) if isinstance(r4d.get("data"), dict) else {}
-        auth_code = (
-            data_section.get("auth_code")
-            or r4d.get("auth_code")
+
+        # 1) Primary: parse `data.redirectUrl` (the real location of auth_code)
+        auth_code = None
+        redirect_url = (
+            data_section.get("redirectUrl")
+            or data_section.get("redirect_url")
+            or data_section.get("Url")
+            or data_section.get("url")
+            or r4d.get("Url")
+            or r4d.get("url")
         )
+        if redirect_url:
+            qs = parse_qs(urlparse(redirect_url).query)
+            if "auth_code" in qs and qs["auth_code"]:
+                auth_code = qs["auth_code"][0]
+
+        # 2) Fallback: direct auth_code field
         if not auth_code:
-            redirect_url = (
-                r4d.get("Url") or r4d.get("url")
-                or data_section.get("Url") or data_section.get("url")
-            )
-            if redirect_url:
-                qs = parse_qs(urlparse(redirect_url).query)
-                if "auth_code" in qs:
-                    auth_code = qs["auth_code"][0]
+            auth_code = data_section.get("auth_code") or r4d.get("auth_code")
 
         if not auth_code:
             return None, (
-                f"Fyers step 4: no auth_code in response. "
+                f"Fyers step 4: could not extract auth_code. "
                 f"status={r4.status_code}, keys={list(r4d.keys())}, "
-                f"data_keys={list(data_section.keys())}"
+                f"data_keys={list(data_section.keys())}, "
+                f"redirectUrl={str(data_section.get('redirectUrl'))[:200]}"
             )
 
-        _s(f"Fyers auth_code obtained, length={len(auth_code)}")
+        _s(f"Fyers auth_code obtained, length={len(auth_code)}, starts={auth_code[:6]}")
 
         # Step 5 — exchange auth_code for access_token via /validate-authcode
         # appIdHash uses the FULL client_id (e.g. "ABC-100"), not the split prefix.
@@ -200,11 +207,11 @@ def _fyers_login(
             return None, f"Fyers step 5: non-JSON response (status {r5.status_code}): {r5.text[:300]}"
 
         if r5d.get("s") != "ok":
-            return None, f"Fyers step 5 failed: {r5d}"
+            return None, f"Fyers step 5 failed (status {r5.status_code}): {str(r5d)[:400]}"
 
         token = r5d.get("access_token")
         if not token:
-            return None, f"Fyers step 5: no access_token in response: {r5d}"
+            return None, f"Fyers step 5: no access_token in response: {str(r5d)[:400]}"
 
         _s(f"Fyers access_token obtained, length={len(token)}, starts={token[:6]}")
         _s("Fyers login complete.")
