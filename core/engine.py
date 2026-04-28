@@ -170,24 +170,29 @@ class AlgoEngine:
 
     def _tick_idle(self, now: datetime):
         """
-        On each 15-min boundary, look at the last two closed 15-min candles
-        and see if they form an inside bar. If yes, transition to WATCHING.
+        On each 15-min boundary, fetch true 15-min OHLC from Fyers history API
+        and check if last 2 candles form an inside bar.
         """
-        df_15m = self.fyers.get_candles(self.index, 15)
+        try:
+            df_15m = self.fyers.get_history_15min(self.index, days_back=3)
+        except Exception as e:
+            self._log("ERROR", f"15-min history fetch failed: {e}")
+            return
+
         if df_15m.empty or len(df_15m) < 2:
             return
 
         # Identify the most recent CLOSED 15-min candle
         last_closed_dt = self._to_ist(df_15m.iloc[-1]["datetime"])
 
-        # If we already inspected this candle, nothing new to do
+        # If we already inspected this candle, skip
         if (self._last_15m_check is not None and
                 self._last_15m_check >= last_closed_dt):
             return
 
         self._last_15m_check = last_closed_dt
 
-        # Run setup detection on full 15-min frame; pick the most recent one
+        # Run setup detection on full 15-min frame
         setups = detect_setups(df_15m, self.index)
         if not setups:
             self._log("INFO",

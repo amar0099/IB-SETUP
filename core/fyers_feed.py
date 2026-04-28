@@ -229,6 +229,55 @@ class FyersFeed:
             return pd.DataFrame()
         return builder.get_candles(interval_minutes, include_partial=include_partial)
 
+    def get_history_15min(self, index: str, days_back: int = 3) -> pd.DataFrame:
+        """
+        Fetch 15-min OHLC directly from Fyers history API (same approach as demo).
+        Returns a DataFrame with columns: datetime, open, high, low, close, volume.
+        Used by the engine for setup detection — accurate exchange OHLC,
+        not built from sampled ticks.
+        """
+        from fyers_apiv3 import fyersModel
+        from datetime import date as _date
+
+        symbol    = FYERS_SYMBOLS[index]
+        today     = _date.today()
+        from_date = today - timedelta(days=days_back * 2 + 7)
+
+        fyers_client = fyersModel.FyersModel(
+            client_id=self.app_id,
+            token=self.access_token,
+            log_path="",
+        )
+
+        resp = fyers_client.history(data={
+            "symbol":      symbol,
+            "resolution":  "15",
+            "date_format": "1",
+            "range_from":  from_date.strftime("%Y-%m-%d"),
+            "range_to":    today.strftime("%Y-%m-%d"),
+            "cont_flag":   "1",
+        })
+        if resp.get("s") != "ok":
+            raise RuntimeError(f"Fyers 15-min history error for {symbol}: {resp}")
+
+        candles = resp.get("candles", [])
+        if not candles:
+            return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+
+        df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["datetime"] = (
+            pd.to_datetime(df["ts"], unit="s", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+        )
+        df = df.drop(columns=["ts"]).sort_values("datetime").reset_index(drop=True)
+
+        # Keep only the last `days_back` unique trading days
+        if not df.empty:
+            unique_days = sorted(df["datetime"].dt.date.unique())
+            keep_days   = unique_days[-days_back:] if len(unique_days) > days_back else unique_days
+            df = df[df["datetime"].dt.date.isin(keep_days)].reset_index(drop=True)
+        return df
+
     def get_ltp(self, index: str) -> Optional[float]:
         builder = self._builders.get(index)
         return builder.latest_ltp() if builder else None
