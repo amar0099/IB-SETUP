@@ -264,7 +264,7 @@ class FyersFeed:
         symbol  = FYERS_SYMBOLS[index]
         to_dt   = datetime.now(IST)
         from_dt = to_dt - timedelta(days=days + 10)
-        headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
+        headers = {"Authorization": f"{self.app_id.split('-')[0]}:{self.access_token}"}
         resp = requests.get(
             "https://api-t1.fyers.in/api/v3/history",
             params={
@@ -278,7 +278,10 @@ class FyersFeed:
             headers=headers,
             timeout=10,
         )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception:
+            raise ValueError(f"Fyers daily OHLC: invalid JSON response (status {resp.status_code}): {resp.text[:200]}")
         if data.get("s") != "ok":
             raise ValueError(data.get("message", "Fyers daily OHLC error"))
         candles = data.get("candles", [])
@@ -305,7 +308,7 @@ class FyersFeed:
         symbol  = FYERS_SYMBOLS[index]
         to_dt   = datetime.now(IST)
         from_dt = to_dt - timedelta(days=days + 10)
-        headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
+        headers = {"Authorization": f"{self.app_id.split('-')[0]}:{self.access_token}"}
         resp = requests.get(
             "https://api-t1.fyers.in/api/v3/history",
             params={
