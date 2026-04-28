@@ -296,7 +296,9 @@ if not creds_ok:
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab_dash, tab_config, tab_log, tab_codelog = st.tabs(["Dashboard", "Config", "Log", "Code Log"])
+tab_dash, tab_config, tab_regime, tab_log, tab_codelog = st.tabs(
+    ["Dashboard", "Config", "Regime", "Log", "Code Log"]
+)
 
 sched = st.session_state.get("scheduler")
 if not sched:
@@ -436,7 +438,9 @@ with tab_dash:
     st.markdown("<div class='sh'>Live status</div>", unsafe_allow_html=True)
 
     summary = engine.status_summary() if engine else {
-        "signal": "—", "position": "—", "ltp": "—", "ema20": "—", "sl_hits": 0
+        "signal": "—", "position": "—", "ltp": "—",
+        "consec_sl": 0, "day_stopped": False,
+        "regime_ok": None, "regime_avg": None,
     }
 
     sc1, sc2, sc3, sc4, sc5 = st.columns(5)
@@ -462,10 +466,33 @@ with tab_dash:
     )
     _stat(sc2, "Position",    summary["position"])
     _stat(sc3, "LTP (Fyers)", summary["ltp"],    "blue")
-    _stat(sc4, "EMA20",       summary["ema20"],  "muted")
-    sl = summary["sl_hits"]
-    _stat(sc5, "SL hits today", f"{sl} / 2",
-          "red" if sl >= 2 else ("amber" if sl == 1 else "green"))
+
+    # v2: Regime status card
+    r_ok  = summary.get("regime_ok")
+    r_avg = summary.get("regime_avg")
+    if r_ok is True:
+        regime_val = f"OK · {r_avg:.2f}%" if r_avg is not None else "OK"
+        regime_css = "green"
+    elif r_ok is False:
+        regime_val = f"BLOCKED · {r_avg:.2f}%" if r_avg is not None else "BLOCKED"
+        regime_css = "red"
+    else:
+        regime_val = "—"
+        regime_css = "muted"
+    _stat(sc4, "Regime", regime_val, regime_css)
+
+    # v2: Consecutive SL counter (resets on TARGET)
+    csl = summary.get("consec_sl", 0)
+    stopped = summary.get("day_stopped", False)
+    if stopped:
+        sc5_label = "Day stopped"
+        sc5_val = f"{csl} / 2 SLs"
+        sc5_css = "red"
+    else:
+        sc5_label = "Consec SL"
+        sc5_val = f"{csl} / 2"
+        sc5_css = "red" if csl >= 2 else ("amber" if csl == 1 else "green")
+    _stat(sc5, sc5_label, sc5_val, sc5_css)
 
     # ── Live candles ──────────────────────────────────────────────────────────
     st.markdown("<div class='sh'>Live 1-min candles (Fyers)</div>", unsafe_allow_html=True)
@@ -575,7 +602,103 @@ with tab_config:
             st.caption("Not connected.")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — LOG
+# TAB 3 — REGIME
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_regime:
+    st.markdown("<div class='sh'>Regime Filter — v2</div>", unsafe_allow_html=True)
+
+    st.caption(
+        "**Logic:** computes 10-day rolling avg daily range as % of price. "
+        "If the average is **> 1.50%**, the entire day is skipped (market too volatile). "
+        "Uses only the 10 trading days strictly **before** today."
+    )
+
+    # Pull regime info from the engine if available
+    diag = engine.regime_info() if engine else {}
+
+    # Status pill
+    rc1, rc2, rc3 = st.columns([1, 1, 1])
+    status = diag.get("status", "no_data")
+    avg    = diag.get("avg")
+    thr    = diag.get("threshold", 1.50)
+
+    with rc1:
+        st.markdown("<div class='lbl'>Status</div>", unsafe_allow_html=True)
+        if status == "ok":
+            st.markdown(
+                "<span class='pill pill-ok'>● Allowed</span>",
+                unsafe_allow_html=True
+            )
+        elif status == "blocked":
+            st.markdown(
+                "<span class='pill pill-bad'>● Blocked</span>",
+                unsafe_allow_html=True
+            )
+        elif status == "insufficient":
+            st.markdown(
+                "<span class='pill pill-warn'>○ Insufficient history</span>",
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                "<span class='pill pill-warn'>○ No data</span>",
+                unsafe_allow_html=True
+            )
+
+    with rc2:
+        st.markdown("<div class='lbl'>10-day Avg Range</div>", unsafe_allow_html=True)
+        if avg is not None:
+            color = "#0d6e3e" if avg <= thr else "#a32d2d"
+            st.markdown(
+                f"<div style='font-size:1.5rem;font-weight:600;color:{color}'>"
+                f"{avg:.3f}%</div>",
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown("<div style='font-size:1.5rem'>—</div>", unsafe_allow_html=True)
+
+    with rc3:
+        st.markdown("<div class='lbl'>Threshold</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='font-size:1.5rem;font-weight:600'>{thr:.2f}%</div>",
+            unsafe_allow_html=True
+        )
+
+    st.divider()
+
+    # Prior days table
+    st.markdown("<div class='sh'>Prior Trading Days</div>", unsafe_allow_html=True)
+
+    prior = diag.get("prior_days", [])
+    needed = diag.get("needed", 10)
+    available = diag.get("prior_count", 0)
+
+    st.caption(f"Available: {available} / {needed} required")
+
+    if prior:
+        prior_df = pd.DataFrame(prior, columns=["Date", "Range %"])
+        prior_df["Range %"] = prior_df["Range %"].apply(lambda x: f"{x:.3f}%")
+        prior_df["Status"] = [
+            "🟢 Calm" if r <= thr else "🔴 Volatile"
+            for _, r in prior
+        ]
+        st.dataframe(prior_df, width='stretch', hide_index=True)
+    else:
+        st.info("No prior daily data loaded yet. Engine fetches this once per day on start.")
+
+    st.divider()
+
+    # Refresh
+    if st.button("↻ Refresh regime data", width='stretch'):
+        if engine:
+            # Force re-fetch on next tick
+            engine._regime_date = None
+            st.toast("Regime will refresh on next engine tick.")
+        st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 4 — LOG
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_log:
 
