@@ -97,6 +97,7 @@ class FyersFeed:
         self._connected   = False
         self._tracked_indices: list[str] = []
         self._log_cb: Optional[Callable] = None   # engine log callback
+        self._poll_interval = 5                    # seconds between REST polls (engine-controlled)
 
         for index in FYERS_SYMBOLS:
             self._builders[index] = CandleBuilder(FYERS_SYMBOLS[index])
@@ -215,7 +216,7 @@ class FyersFeed:
                 time_mod.sleep(min(consecutive_errors * 2, 30))
                 continue
 
-            time_mod.sleep(1)
+            time_mod.sleep(self._poll_interval)
 
         self._log("INFO", "REST poll thread stopped")
         self._connected = False
@@ -238,6 +239,11 @@ class FyersFeed:
     def set_log_callback(self, fn: Callable):
         """Set a callback(level, msg) to surface REST errors in the engine log."""
         self._log_cb = fn
+
+    def set_poll_interval(self, secs: int):
+        """Adjust REST polling frequency. Engine throttles based on state
+        (slow when IDLE, fast when WATCHING/ACTIVE)."""
+        self._poll_interval = max(1, int(secs))
 
     def _log(self, level: str, msg: str):
         if self._log_cb:

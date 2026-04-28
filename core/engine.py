@@ -147,16 +147,18 @@ class AlgoEngine:
 
                 # State machine
                 if self.state == IDLE:
+                    self.fyers.set_poll_interval(60)   # slow feed in IDLE
                     self._tick_idle(now)
-                    # Sleep until next 15-min boundary + 5s buffer for candle close
                     sleep_secs = self._secs_to_next_15m_boundary(now) + 5
                     time_mod.sleep(min(sleep_secs, 900))   # cap at 15 min
 
                 elif self.state == WATCHING:
+                    self.fyers.set_poll_interval(2)    # fast feed when watching
                     self._tick_watching(now)
                     time_mod.sleep(POLL_WATCH)
 
                 elif self.state == ACTIVE:
+                    self.fyers.set_poll_interval(2)    # fast feed during trade
                     self._tick_active(now)
                     time_mod.sleep(POLL_WATCH)
 
