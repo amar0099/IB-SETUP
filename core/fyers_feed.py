@@ -258,57 +258,57 @@ class FyersFeed:
 
     def get_daily_ohlc(self, index: str, days: int = 30) -> pd.DataFrame:
         """
-        Returns daily OHLC dataframe with columns: date, open, high, low, close.
-        Used by the regime filter (needs full O/H/L to compute range_pct).
+        Returns daily OHLC dataframe with columns: date, open, high, low, close, range_pct.
+        Uses Fyers SDK (same approach as the working demo).
         """
-        symbol  = FYERS_SYMBOLS[index]
-        to_dt   = datetime.now(IST)
-        from_dt = to_dt - timedelta(days=days + 10)
-        headers = {"Authorization": f"{self.app_id.split('-')[0]}:{self.access_token}"}
-        resp = requests.get(
-            "https://api-t1.fyers.in/api/v3/history",
-            params={
-                "symbol":      symbol,
-                "resolution":  "D",
-                "date_format": "1",
-                "range_from":  from_dt.strftime("%Y-%m-%d"),
-                "range_to":    to_dt.strftime("%Y-%m-%d"),
-                "cont_flag":   "1",
-            },
-            headers=headers,
-            timeout=10,
+        from fyers_apiv3 import fyersModel
+        from datetime import date as _date
+
+        symbol    = FYERS_SYMBOLS[index]
+        today     = _date.today()
+        # Wider calendar window so weekends/holidays don't reduce trading days below `days`
+        from_date = today - timedelta(days=days * 2 + 14)
+
+        fyers_client = fyersModel.FyersModel(
+            client_id=self.app_id,
+            token=self.access_token,
+            log_path="",
         )
-        try:
-            data = resp.json()
-        except Exception:
-            raise ValueError(f"Fyers daily OHLC: invalid JSON response (status {resp.status_code}): {resp.text[:200]}")
-        if data.get("s") != "ok":
-            raise ValueError(data.get("message", "Fyers daily OHLC error"))
-        candles = data.get("candles", [])
-        # Fyers returns: [epoch, open, high, low, close, volume]
-        rows = []
-        for c in candles:
-            try:
-                dt = datetime.fromtimestamp(c[0], tz=IST).date()
-                rows.append({
-                    "date":  dt,
-                    "open":  float(c[1]),
-                    "high":  float(c[2]),
-                    "low":   float(c[3]),
-                    "close": float(c[4]),
-                })
-            except Exception:
-                continue
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df = df.sort_values("date").reset_index(drop=True)
+
+        resp = fyers_client.history(data={
+            "symbol":      symbol,
+            "resolution":  "D",
+            "date_format": "1",
+            "range_from":  from_date.strftime("%Y-%m-%d"),
+            "range_to":    today.strftime("%Y-%m-%d"),
+            "cont_flag":   "1",
+        })
+
+        if resp.get("s") != "ok":
+            raise RuntimeError(f"Fyers daily history error for {symbol}: {resp}")
+
+        candles = resp.get("candles", [])
+        if not candles:
+            return pd.DataFrame(columns=["date", "open", "high", "low", "close", "range_pct"])
+
+        df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
+        df["date"] = (
+            pd.to_datetime(df["ts"], unit="s", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+            .dt.date
+        )
+        df = df.drop(columns=["ts", "volume"]).sort_values("date").reset_index(drop=True)
+        df["range_pct"] = (df["high"] - df["low"]) / df["open"] * 100
+
+        if len(df) > days:
+            df = df.tail(days).reset_index(drop=True)
         return df
 
     def _fetch_daily_closes_rest(self, index: str, days: int) -> pd.Series:
         symbol  = FYERS_SYMBOLS[index]
         to_dt   = datetime.now(IST)
         from_dt = to_dt - timedelta(days=days + 10)
-        headers = {"Authorization": f"{self.app_id.split('-')[0]}:{self.access_token}"}
+        headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
         resp = requests.get(
             "https://api-t1.fyers.in/api/v3/history",
             params={
