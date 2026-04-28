@@ -135,7 +135,7 @@ _DEFAULTS = {
     "zd_user_id":    _sec("ZERODHA_USER_ID"),
     "zd_password":   _sec("ZERODHA_PASSWORD"),
     "zd_totp_key":   _sec("ZERODHA_TOTP_KEY"),
-    "algo_index":      "NIFTY",
+    "algo_index":      "BANKNIFTY",
     "algo_lots":       1,
     "algo_pe_offset":  0,
     "algo_ce_offset":  0,
@@ -296,8 +296,8 @@ if not creds_ok:
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab_dash, tab_config, tab_regime, tab_log, tab_codelog = st.tabs(
-    ["Dashboard", "Config", "Regime", "Log", "Code Log"]
+tab_dash, tab_config, tab_regime, tab_trades, tab_log, tab_codelog = st.tabs(
+    ["Dashboard", "Config", "Regime", "Trades", "Log", "Code Log"]
 )
 
 sched = st.session_state.get("scheduler")
@@ -377,18 +377,13 @@ with tab_dash:
 
     with b1:
         if st.button("▶ Start", width='stretch',
-                     disabled=(not engine) or eng_running or not st.session_state.algo_expiry):
-            import logging
-            logging.info(f"START BUTTON CLICKED - engine={engine}, expiry={st.session_state.algo_expiry}")
-            engine.expiry     = st.session_state.algo_expiry
-            engine.index      = st.session_state.algo_index
+                     disabled=(not engine) or eng_running):
+            engine.index      = "BANKNIFTY"   # locked
             engine.lots       = st.session_state.algo_lots
             engine.pe_offset  = st.session_state.algo_pe_offset
             engine.ce_offset  = st.session_state.algo_ce_offset
             engine.paper_mode = st.session_state.algo_paper_mode
-            logging.info("About to call engine.start()")
             engine.start()
-            logging.info("engine.start() completed")
             st.rerun()
 
     with b2:
@@ -413,8 +408,7 @@ with tab_dash:
                 engine.pe_offset  = st.session_state.algo_pe_offset
                 engine.ce_offset  = st.session_state.algo_ce_offset
                 engine.paper_mode = st.session_state.algo_paper_mode
-                if st.session_state.algo_expiry:
-                    engine.expiry = st.session_state.algo_expiry
+                # expiry is auto-picked at trade entry — ignore session state
 
                 # Re-subscribe feed to the (possibly new) symbol
                 if fyers:
@@ -520,21 +514,17 @@ with tab_config:
     cfg1, cfg2, cfg3, cfg4 = st.columns([1.4, 1.8, 1, 1])
 
     with cfg1:
-        index = st.selectbox("Index", ["NIFTY","BANKNIFTY"],
-                             index=["NIFTY","BANKNIFTY"].index(st.session_state.algo_index))
-        st.session_state.algo_index = index
+        # v2: locked to BankNifty
+        st.selectbox("Index", ["BANKNIFTY"], disabled=True, index=0,
+                     help="v2 strategy operates on BankNifty only.")
+        st.session_state.algo_index = "BANKNIFTY"
 
     with cfg2:
-        if broker:
-            try:
-                expiries      = broker.get_expiries(index)
-                expiry_labels = [str(e) for e in expiries]
-                exp_sel       = st.selectbox("Expiry", expiry_labels)
-                st.session_state.algo_expiry = expiries[expiry_labels.index(exp_sel)]
-            except Exception:
-                st.selectbox("Expiry", ["(fetch failed)"])
-        else:
-            st.selectbox("Expiry", ["(not connected)"])
+        # v2: expiry is auto-picked at trade entry (current, or next if today=expiry)
+        st.text_input("Expiry", value="auto (current; next on expiry day)",
+                      disabled=True,
+                      help="Engine auto-selects current expiry, or next if today is expiry day.")
+        st.session_state.algo_expiry = None  # ignored by engine
 
     with cfg3:
         lots = st.number_input("Lots", min_value=1, max_value=50,
@@ -698,7 +688,76 @@ with tab_regime:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 4 — LOG
+# TAB 4 — TRADES (paper journal)
+# ═════════════════════════════════════════════════════════════════════════════
+with tab_trades:
+    st.markdown("<div class='sh'>Paper Trades — BankNifty</div>", unsafe_allow_html=True)
+
+    st.caption(
+        "Every trade taken (paper or live) is captured here. "
+        "**LONG** breakouts SELL ATM PE · **SHORT** breakouts SELL ATM CE · "
+        "current expiry (or next, if today is expiry day)."
+    )
+
+    trades = engine.paper_trades if engine else []
+
+    # Summary cards
+    tc1, tc2, tc3, tc4 = st.columns(4)
+    total = len(trades)
+    targets = sum(1 for t in trades if t["exit_reason"] == "TARGET")
+    sls     = sum(1 for t in trades if t["exit_reason"] == "SL")
+    times   = sum(1 for t in trades if t["exit_reason"] == "TIME")
+    opt_pnl = sum((t["opt_pnl"] or 0) for t in trades)
+
+    def _trade_stat(col, label, val, css=""):
+        col.markdown(
+            f"<div class='scard'><div class='slabel'>{label}</div>"
+            f"<div class='sval {css}'>{val}</div></div>",
+            unsafe_allow_html=True,
+        )
+
+    _trade_stat(tc1, "Total trades", total)
+    _trade_stat(tc2, "Wins (Target)", targets, "green")
+    _trade_stat(tc3, "Losses (SL)",   sls,     "red" if sls else "muted")
+    sign = "+" if opt_pnl >= 0 else ""
+    _trade_stat(tc4, "Net option P&L",
+                f"{sign}{round(opt_pnl, 2)}",
+                "green" if opt_pnl >= 0 else "red")
+
+    st.divider()
+
+    if not trades:
+        st.info("No trades yet. The journal will populate as setups trigger and trades close.")
+    else:
+        df_t = pd.DataFrame(trades)
+        # Order columns for readability
+        cols = [
+            "entry_time", "exit_time", "direction", "option_symbol", "expiry",
+            "qty", "spot_entry", "spot_sl", "spot_target",
+            "opt_entry", "opt_exit", "opt_pnl", "exit_reason", "mode",
+        ]
+        df_t = df_t[[c for c in cols if c in df_t.columns]]
+        # Most recent first
+        df_t = df_t.iloc[::-1].reset_index(drop=True)
+        st.dataframe(df_t, width='stretch', hide_index=True)
+
+        # CSV download
+        csv = df_t.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇ Download CSV",
+            data=csv,
+            file_name=f"paper_trades_{datetime.now(IST).strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            width='stretch',
+        )
+
+    st.divider()
+    if st.button("↻ Refresh", width='stretch'):
+        st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5 — LOG
 # ═════════════════════════════════════════════════════════════════════════════
 with tab_log:
 
