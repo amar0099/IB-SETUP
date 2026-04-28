@@ -1,17 +1,20 @@
 """
-core/engine.py — v2 specification
+core/engine.py — v2 spec, event-driven
 
-Changes from v1:
-  - No EMA20 trend filter
-  - Regime gate (10-day avg daily range ≤ 1.5%) — checks before any signal
-  - Consecutive SL tracking — daily circuit breaker after 2 consecutive SLs
-  - Single position enforcement — one trade at a time
-  - Force exit at 15:15
+State machine:
+  IDLE      → wake every 15-min candle close, check last 2 candles for inside bar
+              if found → WATCHING; else stay IDLE
+  WATCHING  → poll 1-min candles, look for breakout within 30 min after baby close
+              if breakout → enter trade → ACTIVE; if window expires → IDLE
+  ACTIVE    → poll 1-min candles, monitor SL / target / time exit
+              on exit → IDLE
+
+This avoids polling 1-min data when no setup exists.
 """
 
 import threading
 import time as time_mod
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from typing import Optional
 import pandas as pd
 import pytz
@@ -22,21 +25,28 @@ from .strategy import (
     regime_allowed, regime_diagnostics,
     Setup, Signal, Trade,
     NO_ENTRY_AFTER, FORCE_EXIT_AT,
-    CONSEC_SL_LIMIT, REGIME_FILTER_ENABLED,
+    BREAKOUT_WINDOW_MIN, CONSEC_SL_LIMIT, REGIME_FILTER_ENABLED,
 )
 from .broker     import ZerodhaClient, LOT_SIZE, EXCHANGE
 from .fyers_feed import FyersFeed
 
 IST           = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN   = time(0, 0)   # set wider for testing — engine itself respects strategy time rules
+MARKET_OPEN   = time(0, 0)        # broad — strategy module enforces real time rules
 MARKET_CLOSE  = time(23, 59)
-POLL_INTERVAL = 10
+
+POLL_IDLE     = 30                # seconds between IDLE checks
+POLL_WATCH    = 5                 # seconds between WATCHING / ACTIVE polls
+
+# Engine states
+IDLE     = "IDLE"
+WATCHING = "WATCHING"
+ACTIVE   = "ACTIVE"
 
 
 class AlgoEngine:
     """
-    Data source : FyersFeed
-    Order source: ZerodhaClient
+    Event-driven inside-bar engine.
+    Data: FyersFeed   Orders: ZerodhaClient
     """
 
     def __init__(self, fyers: FyersFeed, broker: ZerodhaClient):
@@ -55,12 +65,16 @@ class AlgoEngine:
         self.paper_mode = False
 
         # runtime state
+        self.state:           str             = IDLE
         self.active_setup:    Optional[Setup] = None
         self.active_trade:    Optional[Trade] = None
-        self.consec_sl_today: int             = 0     # v2: consecutive SLs (resets on TARGET)
-        self.day_stopped:     bool            = False  # v2: daily circuit-breaker flag
+        self.consec_sl_today: int             = 0
+        self.day_stopped:     bool            = False
         self._last_signal_id: Optional[str]   = None
         self._last_day_reset: Optional[int]   = None
+
+        # 15-min checkpoint tracking (avoid re-checking same closed candle)
+        self._last_15m_check: Optional[datetime] = None
 
         # Regime state
         self._regime_ok:    Optional[bool]  = None
@@ -91,7 +105,7 @@ class AlgoEngine:
         )
         self._thread.start()
         self._log("INFO",
-            f"Algo started (v2) | data: Fyers | orders: Zerodha | {self.index}")
+            f"Algo started (v2 event-driven) | {self.index} | state: {self.state}")
 
     def stop(self):
         self._stop_flag.set()
@@ -120,39 +134,122 @@ class AlgoEngine:
                     time_mod.sleep(5)
                     continue
 
-                # Diagnostic LTP every 30s
-                if not hasattr(self, '_last_ltp_log'):
-                    self._last_ltp_log = 0
-                import time as _t2
-                if _t2.time() - self._last_ltp_log > 30:
-                    self._last_ltp_log = _t2.time()
-                    ltp   = self.fyers.get_ltp(self.index)
-                    df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
-                    self._log("INFO",
-                        f"Feed check — LTP: {ltp or 'None'} | "
-                        f"1m candles: {len(df_1m)} | "
-                        f"connected: {self.fyers.connected}"
-                    )
+                # Day-stopped → no work
+                if self.day_stopped:
+                    time_mod.sleep(POLL_IDLE)
+                    continue
 
-                self._tick(now)
+                # Regime gate (refreshed once per day)
+                self._refresh_regime(now)
+                if REGIME_FILTER_ENABLED and self._regime_ok is False:
+                    time_mod.sleep(POLL_IDLE)
+                    continue
+
+                # State machine
+                if self.state == IDLE:
+                    self._tick_idle(now)
+                    # Sleep until next 15-min boundary + 5s buffer for candle close
+                    sleep_secs = self._secs_to_next_15m_boundary(now) + 5
+                    time_mod.sleep(min(sleep_secs, 900))   # cap at 15 min
+
+                elif self.state == WATCHING:
+                    self._tick_watching(now)
+                    time_mod.sleep(POLL_WATCH)
+
+                elif self.state == ACTIVE:
+                    self._tick_active(now)
+                    time_mod.sleep(POLL_WATCH)
+
             except Exception as e:
-                self._log("ERROR", str(e))
+                self._log("ERROR", f"Loop error: {e}")
+                time_mod.sleep(POLL_IDLE)
 
-            time_mod.sleep(POLL_INTERVAL)
+    # ── IDLE tick: check for inside bar on completed 15-min candles ──────
 
-    def _tick(self, now: datetime):
-        # Already in a trade → manage exit
-        if self.active_trade:
-            self._monitor_trade()
+    def _tick_idle(self, now: datetime):
+        """
+        On each 15-min boundary, look at the last two closed 15-min candles
+        and see if they form an inside bar. If yes, transition to WATCHING.
+        """
+        df_15m = self.fyers.get_candles(self.index, 15)
+        if df_15m.empty or len(df_15m) < 2:
             return
 
-        # v2: daily circuit-breaker
-        if self.day_stopped:
+        # Identify the most recent CLOSED 15-min candle
+        last_closed_dt = self._to_ist(df_15m.iloc[-1]["datetime"])
+
+        # If we already inspected this candle, nothing new to do
+        if (self._last_15m_check is not None and
+                self._last_15m_check >= last_closed_dt):
             return
 
-        # v2: regime gate (refreshed once per day)
-        self._refresh_regime(now)
-        if REGIME_FILTER_ENABLED and self._regime_ok is False:
+        self._last_15m_check = last_closed_dt
+
+        # Run setup detection on full 15-min frame; pick the most recent one
+        setups = detect_setups(df_15m, self.index)
+        if not setups:
+            self._log("INFO",
+                f"15-min check at {last_closed_dt.strftime('%H:%M')} — no inside bar.")
+            return
+
+        candidate = setups[-1]
+        # Only act if this baby is the latest closed candle (fresh setup)
+        if candidate.baby_close_time != last_closed_dt:
+            return
+
+        self.active_setup    = candidate
+        self._last_signal_id = None
+        self.state           = WATCHING
+        self._log("SETUP", (
+            f"Inside bar formed | mother {candidate.mother_low}–"
+            f"{candidate.mother_high} ({candidate.range_pts} pts) | "
+            f"baby closed {candidate.baby_close_time.strftime('%H:%M')} | "
+            f"now WATCHING for breakout (next {BREAKOUT_WINDOW_MIN} min)"
+        ))
+
+    # ── WATCHING tick: poll 1-min, look for breakout ──────────────────────
+
+    def _tick_watching(self, now: datetime):
+        if self.active_setup is None:
+            self.state = IDLE
+            return
+
+        # Window expiry: BREAKOUT_WINDOW_MIN after baby close
+        elapsed_min = (now - self.active_setup.baby_close_time).total_seconds() / 60
+        if elapsed_min > BREAKOUT_WINDOW_MIN:
+            self._log("INFO",
+                f"Breakout window expired ({BREAKOUT_WINDOW_MIN} min) — back to IDLE.")
+            self._reset_setup()
+            return
+
+        if now.time() >= NO_ENTRY_AFTER:
+            self._log("INFO", "Past no-entry cutoff — back to IDLE.")
+            self._reset_setup()
+            return
+
+        # Pull latest 1-min candle (incl. partial)
+        df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
+        if df_1m.empty:
+            return
+        latest_1m = df_1m.iloc[-1].to_dict()
+
+        already = self._last_signal_id == _setup_id(self.active_setup)
+        signal  = check_breakout(latest_1m, self.active_setup, already)
+        if signal is None:
+            return
+
+        self._last_signal_id = _setup_id(self.active_setup)
+        self._log("SIGNAL", (
+            f"{signal.direction} breakout | close {round(latest_1m['close'],2)} | "
+            f"mother {self.active_setup.mother_low}–{self.active_setup.mother_high}"
+        ))
+        self._enter_trade(signal, latest_1m)
+
+    # ── ACTIVE tick: monitor open trade ───────────────────────────────────
+
+    def _tick_active(self, now: datetime):
+        if self.active_trade is None:
+            self.state = IDLE
             return
 
         df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
@@ -160,55 +257,22 @@ class AlgoEngine:
             return
         latest_1m = df_1m.iloc[-1].to_dict()
 
-        # Setup detection on completed 15-min bars
-        self._refresh_setup()
-        if self.active_setup is None:
-            return
+        reason = check_exit(self.active_trade, latest_1m)
+        if reason:
+            self._close_trade(reason)
 
-        already = self._last_signal_id == _setup_id(self.active_setup)
-        # v2: no EMA20 argument
-        signal  = check_breakout(latest_1m, self.active_setup, already)
-        if signal is None:
-            return
-
-        self._last_signal_id = _setup_id(self.active_setup)
-        self._log("SIGNAL", (
-            f"{signal.direction} | close {round(latest_1m['close'],2)} | "
-            f"mother {self.active_setup.mother_low}–{self.active_setup.mother_high}"
-        ))
-        self._enter_trade(signal, latest_1m)
-
-    # ── Setup refresh ────────────────────────────────────────────
-
-    def _refresh_setup(self):
-        df_15m = self.fyers.get_candles(self.index, 15)
-        if df_15m.empty:
-            return
-        setups = detect_setups(df_15m, self.index)
-        if not setups:
-            return
-        candidate = setups[-1]
-        if (self.active_setup is None or
-                _setup_id(candidate) != _setup_id(self.active_setup)):
-            self.active_setup = candidate
-            self._log("SETUP", (
-                f"Inside bar | mother {candidate.mother_low}–"
-                f"{candidate.mother_high} ({candidate.range_pts} pts)"
-            ))
-
-    # ── Regime refresh ───────────────────────────────────────────
+    # ── Regime refresh (daily) ───────────────────────────────────
 
     def _refresh_regime(self, now: datetime):
-        """Fetch daily ranges and compute regime gate. Once per day."""
         doy = now.timetuple().tm_yday
         if self._regime_date == doy and self._regime_diag:
             return
         try:
             self._daily_df = self.fyers.get_daily_ohlc(self.index, days=30)
             if self._daily_df is None or self._daily_df.empty:
-                self._log("INFO", "Regime: no daily data yet, defaulting to allow.")
-                self._regime_ok    = True
-                self._regime_avg   = None
+                self._log("INFO", "Regime: no daily data, defaulting to allow.")
+                self._regime_ok  = True
+                self._regime_avg = None
                 return
 
             ok, avg = regime_allowed(self._daily_df, now.date())
@@ -219,7 +283,7 @@ class AlgoEngine:
             self._regime_diag = diag
             self._regime_date = doy
 
-            status = diag.get("status", "?")
+            status  = diag.get("status", "?")
             avg_str = f"{avg:.2f}%" if avg is not None else "n/a"
             if status == "ok":
                 self._log("INFO",
@@ -229,8 +293,7 @@ class AlgoEngine:
                     f"Regime: BLOCKED · avg {avg_str} > {diag['threshold']}% · skipping day.")
             elif status == "insufficient":
                 self._log("INFO",
-                    f"Regime: insufficient history "
-                    f"({diag['prior_count']}/{diag['needed']} prior days) · defaulting to allow.")
+                    f"Regime: insufficient ({diag['prior_count']}/{diag['needed']} days) · default allow.")
         except Exception as e:
             self._log("ERROR", f"Regime check failed: {e}")
             self._regime_ok = True   # fail-open
@@ -238,15 +301,14 @@ class AlgoEngine:
     # ── Entry ─────────────────────────────────────────────────────
 
     def _enter_trade(self, signal: Signal, latest_1m: dict):
-        # v2: single-position enforcement (already protected by check at top of _tick)
         if self.active_trade is not None:
-            self._log("FILTER", "Already in a trade — skipping new signal.")
             return
 
         entry_price = latest_1m["close"]
         sl, target, risk, _ = build_trade_params(signal, entry_price)
         if sl is None:
-            self._log("FILTER", "Max-range filter rejected setup (>0.40%).")
+            self._log("FILTER", "Max-range filter rejected setup (>0.40%) — back to IDLE.")
+            self._reset_setup()
             return
 
         spot     = self.fyers.get_ltp(self.index) or entry_price
@@ -260,6 +322,7 @@ class AlgoEngine:
         if symbol is None:
             self._log("ERROR",
                 f"Symbol lookup failed: {self.index} {strike}{opt_type} {self.expiry}")
+            self._reset_setup()
             return
 
         qty      = LOT_SIZE[self.index] * self.lots
@@ -273,6 +336,7 @@ class AlgoEngine:
                 self._log("ORDER", f"Sell order → Zerodha | ID: {order_id}")
             except Exception as e:
                 self._log("ERROR", f"Zerodha order failed: {e}")
+                self._reset_setup()
                 return
 
         self.active_trade = Trade(
@@ -285,22 +349,14 @@ class AlgoEngine:
             option_symbol=symbol,
             option_order_id=order_id,
         )
+        self.state = ACTIVE
         tag = "[PAPER] " if self.paper_mode else ""
         self._log("ENTRY", (
             f"{tag}{signal.direction} | SELL {symbol} x{qty} | "
-            f"spot ~{round(spot,2)} | SL {sl} | Target {target} (1:1 RR)"
+            f"spot ~{round(spot,2)} | SL {sl} | Target {target} (1:1) | now ACTIVE"
         ))
 
-    # ── Monitor & exit ────────────────────────────────────────────
-
-    def _monitor_trade(self):
-        df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
-        if df_1m.empty:
-            return
-        latest_1m = df_1m.iloc[-1].to_dict()
-        reason    = check_exit(self.active_trade, latest_1m)
-        if reason:
-            self._close_trade(reason)
+    # ── Exit ──────────────────────────────────────────────────────
 
     def _close_trade(self, reason: str):
         trade = self.active_trade
@@ -315,7 +371,7 @@ class AlgoEngine:
             except Exception as e:
                 self._log("ERROR", f"Exit order failed: {e}")
 
-        # v2: 1:1 RR — pnl is +risk on TARGET, -risk on SL
+        # 1:1 RR
         if reason == "TARGET":
             trade.pnl = round(trade.risk * 1 * qty, 2)
         elif reason == "SL":
@@ -325,25 +381,30 @@ class AlgoEngine:
 
         trade.status = reason
 
-        # v2: consecutive SL tracking — resets on any non-SL exit
+        # Consecutive-SL bookkeeping
         if reason == "SL":
             self.consec_sl_today += 1
             if self.consec_sl_today >= CONSEC_SL_LIMIT:
                 self.day_stopped = True
                 self._log("RISK",
-                    f"{CONSEC_SL_LIMIT} consecutive SLs — trading halted for the day.")
+                    f"{CONSEC_SL_LIMIT} consecutive SLs — day halted.")
         else:
-            self.consec_sl_today = 0   # reset on TARGET / TIME
+            self.consec_sl_today = 0
 
         sign = "+" if trade.pnl >= 0 else ""
         self._log("EXIT",
-            f"{reason} | {trade.option_symbol} | ~P&L {sign}{trade.pnl}")
+            f"{reason} | {trade.option_symbol} | ~P&L {sign}{trade.pnl} | back to IDLE")
 
-        self.active_trade    = None
+        self._reset_setup()
+        self.active_trade = None
+
+    # ── Helpers ──────────────────────────────────────────────────
+
+    def _reset_setup(self):
+        """Return to IDLE; keep daily counters intact."""
         self.active_setup    = None
         self._last_signal_id = None
-
-    # ── Daily reset ───────────────────────────────────────────────
+        self.state           = IDLE
 
     def _daily_reset(self, now: datetime):
         self.consec_sl_today = 0
@@ -351,10 +412,32 @@ class AlgoEngine:
         self.active_setup    = None
         self.active_trade    = None
         self._last_signal_id = None
+        self._last_15m_check = None
         self._last_day_reset = now.timetuple().tm_yday
-        # Force regime re-fetch for the new day
         self._regime_date    = None
+        self.state           = IDLE
         self._log("INFO", f"Daily reset — {now.strftime('%d %b %Y')}")
+
+    def _to_ist(self, dt) -> datetime:
+        if isinstance(dt, str):
+            dt = pd.to_datetime(dt)
+        if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+            return dt.astimezone(IST)
+        return IST.localize(dt)
+
+    def _secs_to_next_15m_boundary(self, now: datetime) -> int:
+        """
+        Seconds until the next 15-min wall-clock boundary
+        (HH:00, HH:15, HH:30, HH:45). Used so IDLE only wakes when a
+        new 15-min candle has closed.
+        """
+        minute  = now.minute
+        next_15 = ((minute // 15) + 1) * 15
+        if next_15 >= 60:
+            target = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        else:
+            target = now.replace(minute=next_15, second=0, microsecond=0)
+        return max(1, int((target - now).total_seconds()))
 
     # ── Log ───────────────────────────────────────────────────────
 
@@ -373,20 +456,20 @@ class AlgoEngine:
         if self.active_trade:
             signal   = self.active_trade.signal.direction
             position = self.active_trade.option_symbol
-        elif self.active_setup:
+        elif self.state == WATCHING:
             signal = "Watching"
         return {
-            "signal":     signal,
-            "position":   position,
-            "consec_sl":  self.consec_sl_today,
+            "signal":      signal,
+            "position":    position,
+            "state":       self.state,
+            "consec_sl":   self.consec_sl_today,
             "day_stopped": self.day_stopped,
-            "regime_ok":  self._regime_ok,
-            "regime_avg": self._regime_avg,
-            "ltp":        self.fyers.get_ltp(self.index) or "—",
+            "regime_ok":   self._regime_ok,
+            "regime_avg":  self._regime_avg,
+            "ltp":         self.fyers.get_ltp(self.index) or "—",
         }
 
     def regime_info(self) -> dict:
-        """Expose regime diagnostics for the UI."""
         return self._regime_diag or {
             "status": "no_data",
             "prior_days": [],
