@@ -1,38 +1,42 @@
 """
-core/engine.py  (v2)
+core/engine.py — v2 specification
 
-Data  → Fyers WebSocket (live ticks → candles built in-memory)
-Orders → Zerodha KiteConnect
-
-The engine runs in a background thread and polls candle snapshots
-from FyersFeed every POLL_INTERVAL seconds.
+Changes from v1:
+  - No EMA20 trend filter
+  - Regime gate (10-day avg daily range ≤ 1.5%) — checks before any signal
+  - Consecutive SL tracking — daily circuit breaker after 2 consecutive SLs
+  - Single position enforcement — one trade at a time
+  - Force exit at 15:15
 """
 
 import threading
 import time as time_mod
 from datetime import datetime, time
 from typing import Optional
+import pandas as pd
 import pytz
 
 from .strategy import (
-    detect_setups, check_breakout, build_trade_params,
-    check_exit, atm_strike, compute_ema20,
+    detect_setups, check_breakout, build_trade_params, check_exit,
+    atm_strike,
+    regime_allowed, regime_diagnostics,
     Setup, Signal, Trade,
     NO_ENTRY_AFTER, FORCE_EXIT_AT,
+    CONSEC_SL_LIMIT, REGIME_FILTER_ENABLED,
 )
 from .broker     import ZerodhaClient, LOT_SIZE, EXCHANGE
 from .fyers_feed import FyersFeed
 
-IST          = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN  = time(0, 0)
-MARKET_CLOSE = time(0, 0)
-POLL_INTERVAL = 10   # seconds between engine ticks
+IST           = pytz.timezone("Asia/Kolkata")
+MARKET_OPEN   = time(0, 0)   # set wider for testing — engine itself respects strategy time rules
+MARKET_CLOSE  = time(23, 59)
+POLL_INTERVAL = 10
 
 
 class AlgoEngine:
     """
-    Data source : FyersFeed  (WebSocket -> in-memory candles)
-    Order source: ZerodhaClient (KiteConnect REST)
+    Data source : FyersFeed
+    Order source: ZerodhaClient
     """
 
     def __init__(self, fyers: FyersFeed, broker: ZerodhaClient):
@@ -51,13 +55,19 @@ class AlgoEngine:
         self.paper_mode = False
 
         # runtime state
-        self.active_setup:    Optional[Setup]  = None
-        self.active_trade:    Optional[Trade]  = None
-        self.sl_hits_today:   int              = 0
+        self.active_setup:    Optional[Setup] = None
+        self.active_trade:    Optional[Trade] = None
+        self.consec_sl_today: int             = 0     # v2: consecutive SLs (resets on TARGET)
+        self.day_stopped:     bool            = False  # v2: daily circuit-breaker flag
         self._last_signal_id: Optional[str]   = None
         self._last_day_reset: Optional[int]   = None
-        self._ema20:          Optional[float]  = None
-        self._ema20_date:     Optional[int]   = None
+
+        # Regime state
+        self._regime_ok:    Optional[bool]  = None
+        self._regime_avg:   Optional[float] = None
+        self._regime_diag:  dict            = {}
+        self._daily_df:     Optional[pd.DataFrame] = None
+        self._regime_date:  Optional[int]   = None
 
         self.log: list[dict] = []
         self._lock = threading.Lock()
@@ -71,7 +81,7 @@ class AlgoEngine:
         try:
             self.fyers.set_log_callback(self._log)
             self.fyers.start_feed([self.index])
-            self._log("INFO", f"Fyers REST feed started for {self.index}")
+            self._log("INFO", f"Fyers feed started for {self.index}")
         except Exception as e:
             self._log("ERROR", f"Fyers feed failed to start: {e}")
 
@@ -81,8 +91,7 @@ class AlgoEngine:
         )
         self._thread.start()
         self._log("INFO",
-            f"Algo started | data: Fyers REST | orders: Zerodha | {self.index}")
-
+            f"Algo started (v2) | data: Fyers | orders: Zerodha | {self.index}")
 
     def stop(self):
         self._stop_flag.set()
@@ -107,17 +116,17 @@ class AlgoEngine:
                     continue
 
                 if not self.fyers.connected:
-                    self._log("INFO", "Waiting for Fyers REST feed…")
+                    self._log("INFO", "Waiting for Fyers feed…")
                     time_mod.sleep(5)
                     continue
 
-                # Diagnostic: log LTP every 30s so we know data is flowing
-                ltp = self.fyers.get_ltp(self.index)
+                # Diagnostic LTP every 30s
                 if not hasattr(self, '_last_ltp_log'):
                     self._last_ltp_log = 0
                 import time as _t2
                 if _t2.time() - self._last_ltp_log > 30:
                     self._last_ltp_log = _t2.time()
+                    ltp   = self.fyers.get_ltp(self.index)
                     df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
                     self._log("INFO",
                         f"Feed check — LTP: {ltp or 'None'} | "
@@ -132,15 +141,18 @@ class AlgoEngine:
             time_mod.sleep(POLL_INTERVAL)
 
     def _tick(self, now: datetime):
+        # Already in a trade → manage exit
         if self.active_trade:
             self._monitor_trade()
             return
 
-        if self.sl_hits_today >= 2:
+        # v2: daily circuit-breaker
+        if self.day_stopped:
             return
 
-        self._refresh_ema(now)
-        if self._ema20 is None:
+        # v2: regime gate (refreshed once per day)
+        self._refresh_regime(now)
+        if REGIME_FILTER_ENABLED and self._regime_ok is False:
             return
 
         df_1m = self.fyers.get_candles(self.index, 1, include_partial=True)
@@ -148,12 +160,14 @@ class AlgoEngine:
             return
         latest_1m = df_1m.iloc[-1].to_dict()
 
+        # Setup detection on completed 15-min bars
         self._refresh_setup()
         if self.active_setup is None:
             return
 
         already = self._last_signal_id == _setup_id(self.active_setup)
-        signal  = check_breakout(latest_1m, self.active_setup, self._ema20, already)
+        # v2: no EMA20 argument
+        signal  = check_breakout(latest_1m, self.active_setup, already)
         if signal is None:
             return
 
@@ -182,28 +196,57 @@ class AlgoEngine:
                 f"{candidate.mother_high} ({candidate.range_pts} pts)"
             ))
 
-    # ── EMA refresh ──────────────────────────────────────────────
+    # ── Regime refresh ───────────────────────────────────────────
 
-    def _refresh_ema(self, now: datetime):
+    def _refresh_regime(self, now: datetime):
+        """Fetch daily ranges and compute regime gate. Once per day."""
         doy = now.timetuple().tm_yday
-        if self._ema20_date == doy and self._ema20 is not None:
+        if self._regime_date == doy and self._regime_diag:
             return
         try:
-            closes = self.fyers.get_daily_closes(self.index, days=30)
-            if len(closes) >= 20:
-                self._ema20      = compute_ema20(closes)
-                self._ema20_date = doy
-                self._log("INFO", f"EMA20: {round(self._ema20, 2)}")
+            self._daily_df = self.fyers.get_daily_ohlc(self.index, days=30)
+            if self._daily_df is None or self._daily_df.empty:
+                self._log("INFO", "Regime: no daily data yet, defaulting to allow.")
+                self._regime_ok    = True
+                self._regime_avg   = None
+                return
+
+            ok, avg = regime_allowed(self._daily_df, now.date())
+            diag    = regime_diagnostics(self._daily_df, now.date())
+
+            self._regime_ok   = ok
+            self._regime_avg  = avg
+            self._regime_diag = diag
+            self._regime_date = doy
+
+            status = diag.get("status", "?")
+            avg_str = f"{avg:.2f}%" if avg is not None else "n/a"
+            if status == "ok":
+                self._log("INFO",
+                    f"Regime: OK · avg {avg_str} ≤ {diag['threshold']}%")
+            elif status == "blocked":
+                self._log("RISK",
+                    f"Regime: BLOCKED · avg {avg_str} > {diag['threshold']}% · skipping day.")
+            elif status == "insufficient":
+                self._log("INFO",
+                    f"Regime: insufficient history "
+                    f"({diag['prior_count']}/{diag['needed']} prior days) · defaulting to allow.")
         except Exception as e:
-            self._log("ERROR", f"EMA20 fetch: {e}")
+            self._log("ERROR", f"Regime check failed: {e}")
+            self._regime_ok = True   # fail-open
 
     # ── Entry ─────────────────────────────────────────────────────
 
     def _enter_trade(self, signal: Signal, latest_1m: dict):
+        # v2: single-position enforcement (already protected by check at top of _tick)
+        if self.active_trade is not None:
+            self._log("FILTER", "Already in a trade — skipping new signal.")
+            return
+
         entry_price = latest_1m["close"]
         sl, target, risk, _ = build_trade_params(signal, entry_price)
         if sl is None:
-            self._log("FILTER", "Max-risk filter rejected setup.")
+            self._log("FILTER", "Max-range filter rejected setup (>0.40%).")
             return
 
         spot     = self.fyers.get_ltp(self.index) or entry_price
@@ -245,7 +288,7 @@ class AlgoEngine:
         tag = "[PAPER] " if self.paper_mode else ""
         self._log("ENTRY", (
             f"{tag}{signal.direction} | SELL {symbol} x{qty} | "
-            f"spot ~{round(spot,2)} | SL {sl} | Target {target}"
+            f"spot ~{round(spot,2)} | SL {sl} | Target {target} (1:1 RR)"
         ))
 
     # ── Monitor & exit ────────────────────────────────────────────
@@ -272,18 +315,25 @@ class AlgoEngine:
             except Exception as e:
                 self._log("ERROR", f"Exit order failed: {e}")
 
+        # v2: 1:1 RR — pnl is +risk on TARGET, -risk on SL
         if reason == "TARGET":
-            trade.pnl = round(trade.risk * 2 * qty, 2)
+            trade.pnl = round(trade.risk * 1 * qty, 2)
         elif reason == "SL":
             trade.pnl = round(-trade.risk * qty, 2)
         else:
             trade.pnl = 0
 
         trade.status = reason
+
+        # v2: consecutive SL tracking — resets on any non-SL exit
         if reason == "SL":
-            self.sl_hits_today += 1
-            if self.sl_hits_today >= 2:
-                self._log("RISK", "2 SL hits today — trading halted.")
+            self.consec_sl_today += 1
+            if self.consec_sl_today >= CONSEC_SL_LIMIT:
+                self.day_stopped = True
+                self._log("RISK",
+                    f"{CONSEC_SL_LIMIT} consecutive SLs — trading halted for the day.")
+        else:
+            self.consec_sl_today = 0   # reset on TARGET / TIME
 
         sign = "+" if trade.pnl >= 0 else ""
         self._log("EXIT",
@@ -296,11 +346,14 @@ class AlgoEngine:
     # ── Daily reset ───────────────────────────────────────────────
 
     def _daily_reset(self, now: datetime):
-        self.sl_hits_today   = 0
+        self.consec_sl_today = 0
+        self.day_stopped     = False
         self.active_setup    = None
         self.active_trade    = None
         self._last_signal_id = None
         self._last_day_reset = now.timetuple().tm_yday
+        # Force regime re-fetch for the new day
+        self._regime_date    = None
         self._log("INFO", f"Daily reset — {now.strftime('%d %b %Y')}")
 
     # ── Log ───────────────────────────────────────────────────────
@@ -323,11 +376,23 @@ class AlgoEngine:
         elif self.active_setup:
             signal = "Watching"
         return {
-            "signal":   signal,
-            "position": position,
-            "sl_hits":  self.sl_hits_today,
-            "ema20":    round(self._ema20, 2) if self._ema20 else "—",
-            "ltp":      self.fyers.get_ltp(self.index) or "—",
+            "signal":     signal,
+            "position":   position,
+            "consec_sl":  self.consec_sl_today,
+            "day_stopped": self.day_stopped,
+            "regime_ok":  self._regime_ok,
+            "regime_avg": self._regime_avg,
+            "ltp":        self.fyers.get_ltp(self.index) or "—",
+        }
+
+    def regime_info(self) -> dict:
+        """Expose regime diagnostics for the UI."""
+        return self._regime_diag or {
+            "status": "no_data",
+            "prior_days": [],
+            "avg": None,
+            "needed": 10,
+            "threshold": 1.50,
         }
 
 

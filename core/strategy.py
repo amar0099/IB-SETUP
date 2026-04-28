@@ -1,10 +1,18 @@
 """
 core/strategy.py
-Inside Bar Breakout – strategy logic (index-level, timeframe-agnostic).
+Inside Bar Breakout — v2 Specification
+
+Changes vs v1:
+  - RR target: 1:2 → 1:1
+  - Mother range max: 0.5% → 0.40% of entry
+  - Force-close: 15:10 → 15:15
+  - Daily SL: 2 hits → 2 CONSECUTIVE SLs
+  - Position concurrency: unlimited → ONE trade at a time
+  - NEW: Regime filter — skip day if 10-day avg daily range > 1.5%
+  - REMOVED: EMA20 trend filter
 """
 
 import pandas as pd
-import numpy as np
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, time
@@ -12,18 +20,35 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 
-NO_ENTRY_AFTER = time(15, 0)
-FORCE_EXIT_AT  = time(15, 10)
-MIN_MOTHER_PTS = 100
-MAX_MOTHER_PCT = 0.005          # 0.5 % of entry
+# ─── v2 constants ──────────────────────────────────────────────────────────────
 
+# Time rules
+NO_ENTRY_AFTER  = time(15, 0)
+FORCE_EXIT_AT   = time(15, 15)   # v2: extended from 15:10
+MARKET_OPEN     = time(9, 15)
+MARKET_CLOSE    = time(15, 15)
+
+# Trade management — v2
+RR_TARGET_MULTIPLE     = 1.0     # v2: 1:1 RR
+MIN_MOTHER_RANGE_PTS   = 100     # min mother range in pts
+MAX_MOTHER_RANGE_PCT   = 0.40    # max mother range as % of entry
+CONSEC_SL_LIMIT        = 2       # stop day after N consecutive SLs
+BREAKOUT_WINDOW_MIN    = 30      # 30 min window after baby close
+
+# Regime filter — v2 headline addition
+REGIME_FILTER_ENABLED  = True
+REGIME_LOOKBACK_DAYS   = 10
+REGIME_MAX_AVG_RANGE   = 1.50    # max avg daily range as % of price
+
+
+# ─── Dataclasses ───────────────────────────────────────────────────────────────
 
 @dataclass
 class Setup:
     index: str
     mother_high: float
     mother_low: float
-    baby_close_time: datetime      # 15-min candle that completed the baby
+    baby_close_time: datetime
     range_pts: float = field(init=False)
 
     def __post_init__(self):
@@ -34,8 +59,8 @@ class Setup:
 class Signal:
     setup: Setup
     direction: str                 # "LONG" | "SHORT"
-    confirmed_at: datetime         # 1-min candle close that fired the breakout
-    entry_price: Optional[float] = None   # filled on next 1-min open
+    confirmed_at: datetime
+    entry_price: Optional[float] = None
 
 
 @dataclass
@@ -49,26 +74,102 @@ class Trade:
     option_symbol: str
     option_order_id: Optional[str] = None
     option_entry_price: Optional[float] = None
-    status: str = "OPEN"           # OPEN | SL | TARGET | TIME | MANUAL
+    status: str = "OPEN"
     pnl: float = 0.0
 
 
-# ─── EMA helpers ───────────────────────────────────────────────────────────────
+# ─── Regime filter ─────────────────────────────────────────────────────────────
 
-def compute_ema20(daily_closes: pd.Series) -> float:
-    """Return the latest 20-day EMA value."""
-    if len(daily_closes) < 20:
-        raise ValueError("Need at least 20 daily closes for EMA20.")
-    return float(daily_closes.ewm(span=20, adjust=False).mean().iloc[-1])
+def compute_daily_ranges(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute daily range_pct from a daily OHLC dataframe.
+    Expects columns: date, open, high, low, close
+    """
+    if daily_df is None or daily_df.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "range_pct"])
+    out = daily_df.copy()
+    if "range_pct" not in out.columns:
+        out["range_pct"] = (out["high"] - out["low"]) / out["open"] * 100
+    return out
 
 
-# ─── Setup detection (runs on completed 15-min candles) ────────────────────────
+def regime_allowed(daily_df: pd.DataFrame, target_date) -> tuple[bool, Optional[float]]:
+    """
+    Check if regime allows trading on target_date.
+    Uses the 10 trading days strictly BEFORE target_date.
+    Returns (allowed, avg_range_pct_or_None)
+    """
+    if not REGIME_FILTER_ENABLED:
+        return True, None
+
+    daily = compute_daily_ranges(daily_df)
+    if daily.empty:
+        return True, None
+
+    if hasattr(target_date, 'date') and len(daily) > 0:
+        try:
+            sample = daily['date'].iloc[0]
+            if not isinstance(target_date, type(sample)):
+                target_date = target_date.date()
+        except Exception:
+            pass
+
+    prior = daily[daily["date"] < target_date].tail(REGIME_LOOKBACK_DAYS)
+    if len(prior) < REGIME_LOOKBACK_DAYS:
+        return True, None
+
+    avg_range = float(prior["range_pct"].mean())
+    return (avg_range <= REGIME_MAX_AVG_RANGE), avg_range
+
+
+def regime_diagnostics(daily_df: pd.DataFrame, target_date) -> dict:
+    """
+    Return diagnostic info about the regime gate for UI display.
+    """
+    daily = compute_daily_ranges(daily_df)
+    if daily.empty:
+        return {
+            "status": "no_data",
+            "available_days": 0,
+            "prior_days": [],
+            "avg": None,
+            "needed": REGIME_LOOKBACK_DAYS,
+            "threshold": REGIME_MAX_AVG_RANGE,
+        }
+
+    if hasattr(target_date, 'date'):
+        try:
+            target_date = target_date.date()
+        except Exception:
+            pass
+
+    prior = daily[daily["date"] < target_date].tail(REGIME_LOOKBACK_DAYS)
+    avg = float(prior["range_pct"].mean()) if len(prior) > 0 else None
+
+    if avg is None or len(prior) < REGIME_LOOKBACK_DAYS:
+        status = "insufficient"
+    elif avg <= REGIME_MAX_AVG_RANGE:
+        status = "ok"
+    else:
+        status = "blocked"
+
+    return {
+        "status":         status,
+        "target_date":    target_date,
+        "available_days": int(len(daily)),
+        "prior_count":    int(len(prior)),
+        "needed":         REGIME_LOOKBACK_DAYS,
+        "prior_days":     [(d.isoformat() if hasattr(d, 'isoformat') else str(d),
+                            round(r, 3))
+                           for d, r in zip(prior["date"], prior["range_pct"])],
+        "avg":            round(avg, 3) if avg is not None else None,
+        "threshold":      REGIME_MAX_AVG_RANGE,
+    }
+
+
+# ─── Setup detection ───────────────────────────────────────────────────────────
 
 def detect_setups(candles_15m: pd.DataFrame, index: str) -> list[Setup]:
-    """
-    candles_15m columns: open, high, low, close, datetime (IST-aware).
-    Returns a deduplicated list of valid inside-bar setups.
-    """
     df = candles_15m.copy().reset_index(drop=True)
     setups: list[Setup] = []
 
@@ -82,19 +183,16 @@ def detect_setups(candles_15m: pd.DataFrame, index: str) -> list[Setup]:
         m_time = _to_ist(mother["datetime"])
         b_time = _to_ist(baby["datetime"])
 
-        # skip first candle of day
-        if m_time.time() == time(9, 15) or b_time.time() == time(9, 15):
+        if m_time.time() == MARKET_OPEN or b_time.time() == MARKET_OPEN:
             continue
-        # skip if baby is the last candle (15:15)
-        if b_time.time() == time(15, 15):
+        if b_time.time() >= MARKET_CLOSE:
             continue
 
-        # inside-bar check
         if not (baby["high"] < mother["high"] and baby["low"] > mother["low"]):
             continue
 
         rng = mother["high"] - mother["low"]
-        if rng < MIN_MOTHER_PTS:
+        if rng < MIN_MOTHER_RANGE_PTS:
             continue
 
         setups.append(Setup(
@@ -104,7 +202,6 @@ def detect_setups(candles_15m: pd.DataFrame, index: str) -> list[Setup]:
             baby_close_time=b_time,
         ))
 
-    # dedup: same baby candle → keep widest mother
     setups = _dedup_setups(setups)
     return setups
 
@@ -118,17 +215,16 @@ def _dedup_setups(setups: list[Setup]) -> list[Setup]:
     return list(seen.values())
 
 
-# ─── Signal confirmation (called on each new 1-min candle close) ───────────────
+# ─── Signal confirmation — v2: NO EMA filter ───────────────────────────────────
 
 def check_breakout(
-    candle_1m: dict,           # {high, low, close, open, datetime}
+    candle_1m: dict,
     setup: Setup,
-    ema20: float,
     already_signalled: bool,
 ) -> Optional[Signal]:
     """
-    Returns a Signal if the 1-min candle confirms a breakout, else None.
-    already_signalled: prevents double-firing on the same setup.
+    Returns Signal if the 1-min candle confirms a breakout, else None.
+    v2: NO EMA20 filter.
     """
     if already_signalled:
         return None
@@ -137,20 +233,17 @@ def check_breakout(
     if now.time() >= NO_ENTRY_AFTER:
         return None
 
-    # window: up to 30 min after baby close
     elapsed = (now - setup.baby_close_time).total_seconds() / 60
-    if elapsed > 30:
+    if elapsed > BREAKOUT_WINDOW_MIN:
         return None
 
-    close  = candle_1m["close"]
+    close = candle_1m["close"]
     broke_up   = close > setup.mother_high
     broke_down = close < setup.mother_low
 
-    # both sides in same candle → dead
     if broke_up and broke_down:
         return None
 
-    direction = None
     if broke_up:
         direction = "LONG"
     elif broke_down:
@@ -158,49 +251,40 @@ def check_breakout(
     else:
         return None
 
-    # EMA trend filter
-    if direction == "LONG"  and close < ema20:
-        return None
-    if direction == "SHORT" and close > ema20:
-        return None
-
     return Signal(setup=setup, direction=direction, confirmed_at=now)
 
 
-# ─── Risk sizing ───────────────────────────────────────────────────────────────
+# ─── Risk sizing — v2: 1:1 RR + 0.40% max range ────────────────────────────────
 
 def build_trade_params(signal: Signal, entry_price: float):
-    """Validate max-risk filter and return sl/target/risk."""
+    """
+    Validate v2 max-range filter and return (sl, target, risk, entry).
+    Returns (None, None, None, None) if max-range filter rejects.
+    """
     setup = signal.setup
     if signal.direction == "LONG":
         sl     = setup.mother_low
-        target = entry_price + 2 * (entry_price - sl)
+        risk   = entry_price - sl
+        target = entry_price + RR_TARGET_MULTIPLE * risk
     else:
         sl     = setup.mother_high
-        target = entry_price - 2 * (sl - entry_price)
+        risk   = sl - entry_price
+        target = entry_price - RR_TARGET_MULTIPLE * risk
 
-    risk = abs(entry_price - sl)
-
-    # max-risk filter: mother range ≤ 0.5 % of entry
-    if setup.range_pts > MAX_MOTHER_PCT * entry_price:
-        return None, None, None, None   # signal dead
+    # v2: max mother range as % of entry (0.40%)
+    if risk > entry_price * (MAX_MOTHER_RANGE_PCT / 100.0):
+        return None, None, None, None
 
     return round(sl, 2), round(target, 2), round(risk, 2), entry_price
 
 
-# ─── Exit logic ────────────────────────────────────────────────────────────────
+# ─── Exit logic — v2: force exit at 15:15 ──────────────────────────────────────
 
 def check_exit(trade: Trade, candle_1m: dict) -> Optional[str]:
-    """
-    Returns exit reason string or None if still in trade.
-    Checks SL, target, and time exit.
-    """
-    now   = _to_ist(candle_1m["datetime"])
-    high  = candle_1m["high"]
-    low   = candle_1m["low"]
-    open_ = candle_1m["open"]
+    now  = _to_ist(candle_1m["datetime"])
+    high = candle_1m["high"]
+    low  = candle_1m["low"]
 
-    # time exit
     if now.time() >= FORCE_EXIT_AT:
         return "TIME"
 
@@ -217,15 +301,12 @@ def check_exit(trade: Trade, candle_1m: dict) -> Optional[str]:
 # ─── ATM strike calculation ────────────────────────────────────────────────────
 
 INDEX_STEP = {
-    "NIFTY":    50,
+    "NIFTY":     50,
     "BANKNIFTY": 100,
 }
 
+
 def atm_strike(spot: float, index: str, offset: int = 0) -> int:
-    """
-    offset in points (e.g. +100, -200).
-    Returns the nearest valid strike + offset, rounded to the index step.
-    """
     step = INDEX_STEP.get(index, 50)
     base = round(spot / step) * step
     raw  = base + offset

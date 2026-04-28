@@ -256,6 +256,51 @@ class FyersFeed:
                 return pd.Series(dtype=float)
             return df["close"].reset_index(drop=True)
 
+    def get_daily_ohlc(self, index: str, days: int = 30) -> pd.DataFrame:
+        """
+        Returns daily OHLC dataframe with columns: date, open, high, low, close.
+        Used by the regime filter (needs full O/H/L to compute range_pct).
+        """
+        symbol  = FYERS_SYMBOLS[index]
+        to_dt   = datetime.now(IST)
+        from_dt = to_dt - timedelta(days=days + 10)
+        headers = {"Authorization": f"{self.app_id}:{self.access_token}"}
+        resp = requests.get(
+            "https://api-t1.fyers.in/api/v3/history",
+            params={
+                "symbol":      symbol,
+                "resolution":  "D",
+                "date_format": "1",
+                "range_from":  from_dt.strftime("%Y-%m-%d"),
+                "range_to":    to_dt.strftime("%Y-%m-%d"),
+                "cont_flag":   "1",
+            },
+            headers=headers,
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("s") != "ok":
+            raise ValueError(data.get("message", "Fyers daily OHLC error"))
+        candles = data.get("candles", [])
+        # Fyers returns: [epoch, open, high, low, close, volume]
+        rows = []
+        for c in candles:
+            try:
+                dt = datetime.fromtimestamp(c[0], tz=IST).date()
+                rows.append({
+                    "date":  dt,
+                    "open":  float(c[1]),
+                    "high":  float(c[2]),
+                    "low":   float(c[3]),
+                    "close": float(c[4]),
+                })
+            except Exception:
+                continue
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values("date").reset_index(drop=True)
+        return df
+
     def _fetch_daily_closes_rest(self, index: str, days: int) -> pd.Series:
         symbol  = FYERS_SYMBOLS[index]
         to_dt   = datetime.now(IST)
