@@ -57,12 +57,12 @@ class AlgoEngine:
         self._stop_flag = threading.Event()
 
         # configurable
-        self.index      = "NIFTY"
-        self.expiry     = None
+        self.index      = "BANKNIFTY"   # v2: locked — strategy is BankNifty-only
+        self.expiry     = None          # auto-picked at entry; user choice ignored
         self.lots       = 1
         self.pe_offset  = 0
         self.ce_offset  = 0
-        self.paper_mode = False
+        self.paper_mode = True          # v2: paper-only by default
 
         # runtime state
         self.state:           str             = IDLE
@@ -82,6 +82,9 @@ class AlgoEngine:
         self._regime_diag:  dict            = {}
         self._daily_df:     Optional[pd.DataFrame] = None
         self._regime_date:  Optional[int]   = None
+
+        # Paper trade journal (one record per closed trade)
+        self.paper_trades: list[dict] = []
 
         self.log: list[dict] = []
         self._lock = threading.Lock()
@@ -307,6 +310,27 @@ class AlgoEngine:
 
     # ── Entry ─────────────────────────────────────────────────────
 
+    def _pick_expiry(self):
+        """
+        Auto-pick the option expiry for entry.
+        - Use current (nearest) expiry.
+        - If today IS the expiry day → switch to next expiry.
+        """
+        try:
+            expiries = self.broker.get_expiries(self.index)
+        except Exception as e:
+            self._log("ERROR", f"Could not fetch expiries: {e}")
+            return None
+        if not expiries:
+            self._log("ERROR", "No upcoming expiries returned by broker.")
+            return None
+
+        today = datetime.now(IST).date()
+        # If first available expiry is today, jump to next
+        if expiries[0] == today and len(expiries) > 1:
+            return expiries[1]
+        return expiries[0]
+
     def _enter_trade(self, signal: Signal, latest_1m: dict):
         if self.active_trade is not None:
             return
@@ -318,19 +342,31 @@ class AlgoEngine:
             self._reset_setup()
             return
 
+        # v2: auto-pick expiry (nearest, or next if today=expiry)
+        expiry = self._pick_expiry()
+        if expiry is None:
+            self._reset_setup()
+            return
+
         spot     = self.fyers.get_ltp(self.index) or entry_price
         opt_type = "PE" if signal.direction == "LONG" else "CE"
         offset   = self.pe_offset if opt_type == "PE" else self.ce_offset
         strike   = atm_strike(spot, self.index, offset)
 
         symbol = self.broker.get_option_symbol(
-            self.index, self.expiry, strike, opt_type
+            self.index, expiry, strike, opt_type
         )
         if symbol is None:
             self._log("ERROR",
-                f"Symbol lookup failed: {self.index} {strike}{opt_type} {self.expiry}")
+                f"Symbol lookup failed: {self.index} {strike}{opt_type} {expiry}")
             self._reset_setup()
             return
+
+        # Capture option entry price (best-effort; falls back to None)
+        try:
+            opt_entry_price = self.broker.get_ltp(EXCHANGE[self.index], symbol)
+        except Exception:
+            opt_entry_price = None
 
         qty      = LOT_SIZE[self.index] * self.lots
         order_id = None
@@ -355,12 +391,17 @@ class AlgoEngine:
             risk=risk,
             option_symbol=symbol,
             option_order_id=order_id,
+            option_entry_price=opt_entry_price,
         )
+        # Stash expiry on the trade for the journal
+        self.active_trade.expiry = expiry
+
         self.state = ACTIVE
         tag = "[PAPER] " if self.paper_mode else ""
+        opt_str = f" | opt entry ~{round(opt_entry_price,2)}" if opt_entry_price else ""
         self._log("ENTRY", (
-            f"{tag}{signal.direction} | SELL {symbol} x{qty} | "
-            f"spot ~{round(spot,2)} | SL {sl} | Target {target} (1:1) | now ACTIVE"
+            f"{tag}{signal.direction} | SELL {symbol} ({expiry}) x{qty} | "
+            f"spot ~{round(spot,2)}{opt_str} | SL {sl} | Target {target} (1:1)"
         ))
 
     # ── Exit ──────────────────────────────────────────────────────
@@ -368,6 +409,12 @@ class AlgoEngine:
     def _close_trade(self, reason: str):
         trade = self.active_trade
         qty   = LOT_SIZE[self.index] * self.lots
+
+        # Capture option exit price (best-effort)
+        try:
+            opt_exit_price = self.broker.get_ltp(EXCHANGE[self.index], trade.option_symbol)
+        except Exception:
+            opt_exit_price = None
 
         if not self.paper_mode:
             try:
@@ -378,15 +425,39 @@ class AlgoEngine:
             except Exception as e:
                 self._log("ERROR", f"Exit order failed: {e}")
 
-        # 1:1 RR
+        # 1:1 RR — index-level pnl (used for circuit breaker tracking)
         if reason == "TARGET":
             trade.pnl = round(trade.risk * 1 * qty, 2)
         elif reason == "SL":
             trade.pnl = round(-trade.risk * qty, 2)
         else:
             trade.pnl = 0
-
         trade.status = reason
+
+        # Option-level pnl (we SOLD the option, so profit when exit < entry)
+        opt_pnl = None
+        if trade.option_entry_price is not None and opt_exit_price is not None:
+            opt_pnl = round((trade.option_entry_price - opt_exit_price) * qty, 2)
+
+        # Journal entry — captured for both paper and live for traceability
+        now_ist = datetime.now(IST)
+        self.paper_trades.append({
+            "entry_time":     trade.signal.confirmed_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "exit_time":      now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+            "direction":      trade.signal.direction,
+            "index":          trade.index,
+            "expiry":         str(getattr(trade, 'expiry', '')),
+            "option_symbol":  trade.option_symbol,
+            "qty":            qty,
+            "spot_entry":     trade.entry_price,
+            "spot_sl":        trade.sl,
+            "spot_target":    trade.target,
+            "opt_entry":      trade.option_entry_price,
+            "opt_exit":       opt_exit_price,
+            "opt_pnl":        opt_pnl,
+            "exit_reason":    reason,
+            "mode":           "PAPER" if self.paper_mode else "LIVE",
+        })
 
         # Consecutive-SL bookkeeping
         if reason == "SL":
@@ -398,9 +469,14 @@ class AlgoEngine:
         else:
             self.consec_sl_today = 0
 
+        opt_str = ""
+        if opt_pnl is not None:
+            opt_str = f" | opt P&L {('+' if opt_pnl >= 0 else '')}{opt_pnl}"
+
         sign = "+" if trade.pnl >= 0 else ""
         self._log("EXIT",
-            f"{reason} | {trade.option_symbol} | ~P&L {sign}{trade.pnl} | back to IDLE")
+            f"{reason} | {trade.option_symbol}{opt_str} | "
+            f"spot P&L {sign}{trade.pnl} | back to IDLE")
 
         self._reset_setup()
         self.active_trade = None
