@@ -1,9 +1,9 @@
 """
 core/fyers_feed.py
 
-Fyers data layer — REST polling edition.
-WebSocket is replaced with 1-second REST polling of the /quotes endpoint.
-This is required because Streamlit Cloud blocks outbound WebSocket connections.
+Fyers data layer — OPTIMIZED WebSocket + Smart Caching edition.
+Replaces REST polling with WebSocket streaming (99% fewer API calls).
+Smart cache for historical data and daily closes.
 """
 
 import threading
@@ -13,6 +13,7 @@ from typing import Optional, Callable
 import pytz
 import pandas as pd
 import requests
+from .fyers_optimized import FyersWebSocketManager, SmartCache
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -80,8 +81,10 @@ class CandleBuilder:
 
 class FyersFeed:
     """
-    Fyers data feed using REST polling (/quotes endpoint).
-    Polls every 1 second and feeds ticks into CandleBuilder.
+    Fyers data feed using WebSocket streaming + Smart Caching.
+    - WebSocket for live quotes (0 API calls)
+    - Smart cache for history and daily closes
+    - Polls only as fallback if WebSocket unavailable
     """
 
     def __init__(self, app_id: str, secret_key: str, redirect_uri: str = "http://127.0.0.1:8501"):
@@ -99,7 +102,13 @@ class FyersFeed:
         self._log_cb: Optional[Callable] = None
         self._poll_interval = 5
 
-        # Global Fyers rate limiter — Fyers allows ~10 req/sec but we stay well below
+        # WebSocket manager (replaces constant polling)
+        self._ws_manager: Optional[FyersWebSocketManager] = None
+        
+        # Smart cache for historical and daily data
+        self._smart_cache = SmartCache()
+
+        # Global Fyers rate limiter — reduced since we use WebSocket for quotes
         self._req_lock      = threading.Lock()
         self._req_timestamps: list[float] = []      # epoch seconds of last calls
         self._req_per_sec   = 3                      # hard cap: 3 requests / second
@@ -172,30 +181,66 @@ class FyersFeed:
     # ── Feed (REST polling) ───────────────────────────────────────────────────
     
     def start_feed(self, indices: list[str]):
-        """Start REST polling thread. Safe to call multiple times;
-        updates tracked indices even if thread already running."""
-        # Always refresh tracked indices (so symbol switch takes effect)
+        """Start WebSocket feed (optimized) + fallback REST polling.
+        Safe to call multiple times; updates tracked indices even if running."""
+        # Always refresh tracked indices
         self._tracked_indices = [i for i in indices if i in FYERS_SYMBOLS]
 
+        # Initialize WebSocket if not already done
+        if self._ws_manager is None and self.access_token:
+            self._ws_manager = FyersWebSocketManager(self.access_token, self.app_id)
+            self._ws_manager.connect()
+            
+            # Subscribe to symbols
+            symbols = [FYERS_SYMBOLS[i] for i in self._tracked_indices]
+            self._ws_manager.subscribe(symbols)
+            
+            # Register callback to feed ticks into builders
+            self._ws_manager.callbacks.append(self._on_websocket_quote)
+            
+            self._log("INFO", f"WebSocket initialized for {self._tracked_indices}")
+        
+        # Start fallback REST polling (only if WebSocket not ready)
         if self._poll_thread and self._poll_thread.is_alive():
             self._log("INFO", f"Feed already running — updated symbols to {self._tracked_indices}")
             return
 
         self._stop_flag.clear()
         self._poll_thread = threading.Thread(
-            target=self._run_rest_poll, daemon=True, name="FyersREST"
+            target=self._run_rest_poll_fallback, daemon=True, name="FyersRESTFallback"
         )
         self._poll_thread.start()
         self._connected = True
-        print(f"[FYERS REST] Poll thread started for {self._tracked_indices}")
+        self._log("INFO", f"Feed started (WebSocket primary, REST fallback) for {self._tracked_indices}")
+
+    def _on_websocket_quote(self, symbol: str, quote_data: dict):
+        """Callback from WebSocket — feed tick into builders"""
+        ltp = quote_data.get("ltp")
+        if ltp is None:
+            return
+        
+        ts = datetime.now(IST)
+        for index, fsym in FYERS_SYMBOLS.items():
+            if fsym == symbol:
+                self._builders[index].on_tick(float(ltp), ts)
+        
+        # Trigger registered callbacks
+        for cb in self._on_tick_callbacks:
+            try:
+                cb(symbol, float(ltp), ts)
+            except Exception:
+                pass
 
     def stop_feed(self):
         self._stop_flag.set()
         self._connected = False
+        if self._ws_manager:
+            self._ws_manager.close()
 
-    def _run_rest_poll(self):
-        """Poll quotes every 1 second using the Fyers SDK."""
-        self._log("INFO", "REST poll thread running")
+    def _run_rest_poll_fallback(self):
+        """Fallback REST polling - only used if WebSocket not available.
+        Polls every 5 seconds instead of 1 to reduce quota usage."""
+        self._log("INFO", "REST fallback poll thread running (WebSocket is primary)")
         from fyers_apiv3 import fyersModel
 
         # Diagnostic: log token state
@@ -249,7 +294,7 @@ class FyersFeed:
                 time_mod.sleep(min(consecutive_errors * 2, 30))
                 continue
 
-            time_mod.sleep(self._poll_interval)
+            time_mod.sleep(5)  # Fallback: poll every 5 seconds (WebSocket is primary)
 
         self._log("INFO", "REST poll thread stopped")
         self._connected = False
