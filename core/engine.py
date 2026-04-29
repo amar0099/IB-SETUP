@@ -13,6 +13,7 @@ This avoids polling 1-min data when no setup exists.
 """
 
 import threading
+from pathlib import Path
 import time as time_mod
 from datetime import datetime, time, timedelta
 from typing import Optional
@@ -275,38 +276,66 @@ class AlgoEngine:
 
     def _refresh_regime(self, now: datetime):
         doy = now.timetuple().tm_yday
+
+        # Already computed today
         if self._regime_date == doy and self._regime_diag:
             return
-        try:
-            self._daily_df = self.fyers.get_daily_ohlc(self.index, days=30)
-            if self._daily_df is None or self._daily_df.empty:
-                self._log("INFO", "Regime: no daily data, defaulting to allow.")
-                self._regime_ok  = True
-                self._regime_avg = None
+
+        # Try disk cache first (survives script reruns)
+        cache_path = Path(".tokens") / f"regime_{self.index}_{now.date().isoformat()}.parquet"
+        if self._daily_df is None and cache_path.exists():
+            try:
+                self._daily_df = pd.read_parquet(cache_path)
+                self._log("INFO", "Regime: loaded daily OHLC from disk cache.")
+            except Exception:
+                pass
+
+        # Hit Fyers only if we still have nothing
+        if self._daily_df is None or self._daily_df.empty:
+            try:
+                self._daily_df = self.fyers.get_daily_ohlc(self.index, days=30)
+                # Persist for the rest of the day
+                try:
+                    cache_path.parent.mkdir(exist_ok=True)
+                    self._daily_df.to_parquet(cache_path)
+                except Exception:
+                    pass
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg or "request limit" in msg.lower():
+                    self._log("RISK",
+                        "Regime: Fyers rate-limited (429). Will retry next tick — defaulting to allow.")
+                    self._regime_ok = True
+                    return
+                self._log("ERROR", f"Regime check failed: {e}")
+                self._regime_ok = True   # fail-open
                 return
 
-            ok, avg = regime_allowed(self._daily_df, now.date())
-            diag    = regime_diagnostics(self._daily_df, now.date())
+        if self._daily_df is None or self._daily_df.empty:
+            self._log("INFO", "Regime: no daily data, defaulting to allow.")
+            self._regime_ok  = True
+            self._regime_avg = None
+            return
 
-            self._regime_ok   = ok
-            self._regime_avg  = avg
-            self._regime_diag = diag
-            self._regime_date = doy
+        ok, avg = regime_allowed(self._daily_df, now.date())
+        diag    = regime_diagnostics(self._daily_df, now.date())
 
-            status  = diag.get("status", "?")
-            avg_str = f"{avg:.2f}%" if avg is not None else "n/a"
-            if status == "ok":
-                self._log("INFO",
-                    f"Regime: OK · avg {avg_str} ≤ {diag['threshold']}%")
-            elif status == "blocked":
-                self._log("RISK",
-                    f"Regime: BLOCKED · avg {avg_str} > {diag['threshold']}% · skipping day.")
-            elif status == "insufficient":
-                self._log("INFO",
-                    f"Regime: insufficient ({diag['prior_count']}/{diag['needed']} days) · default allow.")
-        except Exception as e:
-            self._log("ERROR", f"Regime check failed: {e}")
-            self._regime_ok = True   # fail-open
+        self._regime_ok   = ok
+        self._regime_avg  = avg
+        self._regime_diag = diag
+        self._regime_date = doy
+
+        status  = diag.get("status", "?")
+        avg_str = f"{avg:.2f}%" if avg is not None else "n/a"
+        if status == "ok":
+            self._log("INFO",
+                f"Regime: OK · avg {avg_str} ≤ {diag['threshold']}%")
+        elif status == "blocked":
+            self._log("RISK",
+                f"Regime: BLOCKED · avg {avg_str} > {diag['threshold']}% · skipping day.")
+        elif status == "insufficient":
+            self._log("INFO",
+                f"Regime: insufficient ({diag['prior_count']}/{diag['needed']} days) · default allow.")
 
     # ── Entry ─────────────────────────────────────────────────────
 
