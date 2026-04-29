@@ -96,11 +96,43 @@ class FyersFeed:
         self._on_tick_callbacks: list[Callable] = []
         self._connected   = False
         self._tracked_indices: list[str] = []
-        self._log_cb: Optional[Callable] = None   # engine log callback
-        self._poll_interval = 5                    # seconds between REST polls (engine-controlled)
+        self._log_cb: Optional[Callable] = None
+        self._poll_interval = 5
+
+        # Global Fyers rate limiter — Fyers allows ~10 req/sec but we stay well below
+        self._req_lock      = threading.Lock()
+        self._req_timestamps: list[float] = []      # epoch seconds of last calls
+        self._req_per_sec   = 3                      # hard cap: 3 requests / second
+        self._req_per_min   = 100                    # hard cap: 100 requests / minute
+
+        # In-memory caches to eliminate redundant fetches
+        self._history_cache: dict[str, dict] = {}    # key → {"df": df, "fetched_at": ts}
+        self._daily_cache:   dict[str, dict] = {}
 
         for index in FYERS_SYMBOLS:
             self._builders[index] = CandleBuilder(FYERS_SYMBOLS[index])
+
+    def _rate_limit_wait(self):
+        """Block until we're below per-sec and per-min caps."""
+        import time as _t
+        with self._req_lock:
+            now = _t.time()
+            # purge timestamps older than 60s
+            self._req_timestamps = [t for t in self._req_timestamps if now - t < 60]
+            # check per-second
+            recent_1s = [t for t in self._req_timestamps if now - t < 1]
+            if len(recent_1s) >= self._req_per_sec:
+                _t.sleep(1.1)
+                return self._rate_limit_wait()
+            # check per-minute
+            if len(self._req_timestamps) >= self._req_per_min:
+                oldest = self._req_timestamps[0]
+                wait = 60 - (now - oldest) + 0.5
+                if wait > 0:
+                    _t.sleep(wait)
+                return self._rate_limit_wait()
+            # record
+            self._req_timestamps.append(now)
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -182,6 +214,7 @@ class FyersFeed:
         while not self._stop_flag.is_set():
             try:
                 symbols = ",".join(FYERS_SYMBOLS[i] for i in self._tracked_indices)
+                self._rate_limit_wait()
                 data = fyers_client.quotes({"symbols": symbols})
 
                 if data.get("s") == "ok":
@@ -231,11 +264,15 @@ class FyersFeed:
 
     def get_history_15min(self, index: str, days_back: int = 3) -> pd.DataFrame:
         """
-        Fetch 15-min OHLC directly from Fyers history API (same approach as demo).
-        Returns a DataFrame with columns: datetime, open, high, low, close, volume.
-        Used by the engine for setup detection — accurate exchange OHLC,
-        not built from sampled ticks.
+        Fetch 15-min OHLC from Fyers history API. Cached for 60 seconds —
+        the engine only checks setups every 15 minutes, so this is plenty fresh.
         """
+        import time as _t
+        cache_key = f"15m_{index}_{days_back}"
+        cached    = self._history_cache.get(cache_key)
+        if cached and (_t.time() - cached["fetched_at"]) < 60:
+            return cached["df"]
+
         from fyers_apiv3 import fyersModel
         from datetime import date as _date
 
@@ -249,6 +286,7 @@ class FyersFeed:
             log_path="",
         )
 
+        self._rate_limit_wait()
         resp = fyers_client.history(data={
             "symbol":      symbol,
             "resolution":  "15",
@@ -271,11 +309,12 @@ class FyersFeed:
         )
         df = df.drop(columns=["ts"]).sort_values("datetime").reset_index(drop=True)
 
-        # Keep only the last `days_back` unique trading days
         if not df.empty:
             unique_days = sorted(df["datetime"].dt.date.unique())
             keep_days   = unique_days[-days_back:] if len(unique_days) > days_back else unique_days
             df = df[df["datetime"].dt.date.isin(keep_days)].reset_index(drop=True)
+
+        self._history_cache[cache_key] = {"df": df, "fetched_at": _t.time()}
         return df
 
     def get_ltp(self, index: str) -> Optional[float]:
@@ -313,15 +352,21 @@ class FyersFeed:
 
     def get_daily_ohlc(self, index: str, days: int = 30) -> pd.DataFrame:
         """
-        Returns daily OHLC dataframe with columns: date, open, high, low, close, range_pct.
-        Uses Fyers SDK (same approach as the working demo).
+        Returns daily OHLC dataframe. Cached in-memory for the rest of the day.
+        Engine also caches to disk so cross-restart calls don't hit Fyers.
         """
-        from fyers_apiv3 import fyersModel
+        import time as _t
         from datetime import date as _date
+
+        cache_key = f"daily_{index}_{_date.today().isoformat()}"
+        cached    = self._daily_cache.get(cache_key)
+        if cached:
+            return cached["df"]
+
+        from fyers_apiv3 import fyersModel
 
         symbol    = FYERS_SYMBOLS[index]
         today     = _date.today()
-        # Wider calendar window so weekends/holidays don't reduce trading days below `days`
         from_date = today - timedelta(days=days * 2 + 14)
 
         fyers_client = fyersModel.FyersModel(
@@ -330,6 +375,7 @@ class FyersFeed:
             log_path="",
         )
 
+        self._rate_limit_wait()
         resp = fyers_client.history(data={
             "symbol":      symbol,
             "resolution":  "D",
@@ -357,6 +403,8 @@ class FyersFeed:
 
         if len(df) > days:
             df = df.tail(days).reset_index(drop=True)
+
+        self._daily_cache[cache_key] = {"df": df, "fetched_at": _t.time()}
         return df
 
     def _fetch_daily_closes_rest(self, index: str, days: int) -> pd.Series:
