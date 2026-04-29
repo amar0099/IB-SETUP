@@ -353,7 +353,7 @@ with tab_dash:
             clear_all_caches()
             st.toast("Cache cleared.")
     with mb3:
-        if st.button("↻ Refresh", width='stretch'):
+        if st.button("↻ Refresh", width='stretch', key="trades_refresh"):
             st.rerun()
 
     # ── Engine controls ───────────────────────────────────────────────────────
